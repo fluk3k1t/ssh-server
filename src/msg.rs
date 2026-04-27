@@ -1,30 +1,68 @@
-use std::io;
+use std::{collections::VecDeque, io};
 
-use bytes::{Buf, BytesMut};
+use bytes::{Buf, BufMut, BytesMut};
 
 use crate::Payload;
 
 pub trait Parse: Sized {
     fn parse(src: &mut Payload) -> io::Result<Self>;
 }
+
+pub trait Encode: Sized {
+    fn encode(&self) -> BytesMut;
+}
+
 #[derive(Debug)]
 pub enum MessageNumber {
     SSH_MSG_KEXINIT = 20,
 }
 
 #[derive(Debug)]
+pub struct NameList {
+    inner: Vec<String>,
+}
+
+impl From<Vec<String>> for NameList {
+    fn from(value: Vec<String>) -> Self {
+        NameList::new(value)
+    }
+}
+
+impl NameList {
+    pub fn new(inner: Vec<String>) -> Self {
+        NameList { inner }
+    }
+}
+
+impl Encode for NameList {
+    fn encode(&self) -> BytesMut {
+        let name_list_bytes = self.inner.join(",");
+        let name_list_bytes = Vec::from_iter(name_list_bytes.into_bytes());
+
+        let lenght: [u8; 4] = (name_list_bytes.len() as u32).to_be_bytes();
+
+        let mut bytes = BytesMut::new();
+
+        bytes.extend_from_slice(&lenght);
+        bytes.extend_from_slice(&name_list_bytes);
+
+        bytes
+    }
+}
+
+#[derive(Debug)]
 pub struct AlgorithmNegotiation {
     pub cookie: [u8; 16],
-    pub kex_algorithms: Vec<String>,
-    pub server_host_key_algorithms: Vec<String>,
-    pub encryption_algorithms_client_to_server: Vec<String>,
-    pub encryption_algorithms_server_to_client: Vec<String>,
-    pub mac_algorithms_client_to_server: Vec<String>,
-    pub mac_algorithms_server_to_client: Vec<String>,
-    pub compression_algorithms_client_to_server: Vec<String>,
-    pub compression_algorithms_server_to_client: Vec<String>,
-    pub languages_client_to_server: Vec<String>,
-    pub languages_server_to_client: Vec<String>,
+    pub kex_algorithms: NameList,
+    pub server_host_key_algorithms: NameList,
+    pub encryption_algorithms_client_to_server: NameList,
+    pub encryption_algorithms_server_to_client: NameList,
+    pub mac_algorithms_client_to_server: NameList,
+    pub mac_algorithms_server_to_client: NameList,
+    pub compression_algorithms_client_to_server: NameList,
+    pub compression_algorithms_server_to_client: NameList,
+    pub languages_client_to_server: NameList,
+    pub languages_server_to_client: NameList,
     pub first_kex_packet_follows: bool,
 }
 
@@ -79,12 +117,37 @@ impl Parse for AlgorithmNegotiation {
     }
 }
 
-fn parse_name_list(src: &mut BytesMut) -> io::Result<Vec<String>> {
+impl Encode for AlgorithmNegotiation {
+    fn encode(&self) -> BytesMut {
+        let mut bytes = BytesMut::new();
+
+        bytes.put_u8(MessageNumber::SSH_MSG_KEXINIT as u8);
+        bytes.put(&self.cookie[..]);
+
+        bytes.extend_from_slice(&self.kex_algorithms.encode());
+        bytes.extend_from_slice(&self.server_host_key_algorithms.encode());
+        bytes.extend_from_slice(&self.encryption_algorithms_client_to_server.encode());
+        bytes.extend_from_slice(&self.encryption_algorithms_server_to_client.encode());
+        bytes.extend_from_slice(&self.mac_algorithms_client_to_server.encode());
+        bytes.extend_from_slice(&self.mac_algorithms_server_to_client.encode());
+        bytes.extend_from_slice(&self.compression_algorithms_client_to_server.encode());
+        bytes.extend_from_slice(&self.compression_algorithms_server_to_client.encode());
+        bytes.extend_from_slice(&self.languages_client_to_server.encode());
+        bytes.extend_from_slice(&self.languages_server_to_client.encode());
+
+        bytes.put_u8(if self.first_kex_packet_follows { 1 } else { 0 });
+        bytes.put_bytes(b'0', 4);
+
+        bytes
+    }
+}
+
+fn parse_name_list(src: &mut BytesMut) -> io::Result<NameList> {
     let length = src.get_u32();
     let name_list = String::from_utf8_lossy(&src.split_to(length as usize))
         .split(",")
         .map(String::from)
         .collect::<Vec<_>>();
 
-    Ok(name_list)
+    Ok(NameList::from(name_list))
 }

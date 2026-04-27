@@ -1,9 +1,11 @@
 use std::{cmp::min, io};
 
 use bytes::Buf;
-use tokio_util::codec::Decoder;
+use tokio_util::codec::{Decoder, Encoder};
 
 use bytes::BytesMut;
+
+use crate::{AlgorithmNegotiation, Encode};
 
 #[derive(Debug)]
 pub struct BinaryPacket {
@@ -81,5 +83,25 @@ impl Decoder for BinaryPacketDecoder {
                 }
             }
         }
+    }
+}
+
+pub struct BinaryPacketEncoder {}
+
+impl Default for BinaryPacketEncoder {
+    fn default() -> Self {
+        BinaryPacketEncoder {}
+    }
+}
+
+impl Encoder<AlgorithmNegotiation> for BinaryPacketEncoder {
+    type Error = io::Error;
+
+    fn encode(
+        &mut self,
+        item: AlgorithmNegotiation,
+        dst: &mut BytesMut,
+    ) -> Result<(), Self::Error> {
+        Ok(dst.extend_from_slice(&item.encode()))
     }
 }
