@@ -36,6 +36,7 @@ pub struct SshServer {
     client_identification: Option<Identification>,
 }
 
+#[derive(Debug, Clone)]
 pub struct Identification {
     softwareversion: String,
     protoversion: String,
@@ -99,33 +100,46 @@ impl SshServer {
         let server_shared = server_secret.diffie_hellman(&ecdh.client_public_key);
         let server_tmp_public = server_secret.public_key();
 
-        let V_C = self
-            .client_identification
-            .as_ref()
-            .unwrap()
-            .encode()
-            .trim_end_matches("\r\n");
+        let V_C = self.client_identification.clone().unwrap();
+        let V_C = V_C.encode();
+        let V_C = V_C.trim_end_matches("\r\n");
+
+        let V_C = BytesMut::from(V_C);
 
         // SigningKey経由でしかKeyPairを生成できないのは不用意にprivateを露出させないみたいな意図があるんでしょうかね
-        // 何にしてもdocs読んで変換探すのがだるいのでやめてほしい所存
+        // 何にしてもdocs読んで型変換探すのがだるいのでやめてほしい所存
         let server_signing_key = ed25519_dalek::SigningKey::generate(&mut OsRng);
+
+        // サーバー側では秘密鍵を保持しておいて二回目以降で使い回し、クライアントは初回に送信された公開鍵を保存しておいて二回目以降で照合してmitmを防ぐ的な
+        // WARNING: REMOTE HOST IDENTIFICATION HAS CHANGED! の話
         let server_keypair = KeypairBytes::from_bytes(&server_signing_key.to_keypair_bytes());
 
         // KeypairBytes::
 
-        let V_S = "SSH-2.0-OpenSSH_10.0";
+        let V_S = BytesMut::from("SSH-2.0-OpenSSH_10.0");
 
         let I_C = binary_packet.payload.inner.clone();
 
         let I_S = binary_packet.payload.inner;
 
-        let K_S = server_keypair.public_key.unwrap();
+        let K_S = BytesMut::from(&server_keypair.public_key.unwrap().to_bytes()[..]);
 
-        let Q_C = ecdh.client_public_key.to_sec1_bytes();
+        let Q_C = BytesMut::from(&ecdh.client_public_key.to_sec1_bytes()[..]);
 
-        let Q_S = server_tmp_public.to_sec1_bytes();
+        let Q_S = BytesMut::from(&server_tmp_public.to_sec1_bytes()[..]);
 
-        let K = server_shared.raw_secret_bytes();
+        let K = BytesMut::from(server_shared.raw_secret_bytes().as_slice());
+
+        // let exchange_concatation = format!("{}{}{}", V_C, V_S, I_C);
+        let mut exchange_concatation = BytesMut::new();
+        exchange_concatation.put(V_C);
+        exchange_concatation.put(V_S);
+        exchange_concatation.put(I_C);
+        exchange_concatation.put(I_S);
+        exchange_concatation.put(K_S);
+        exchange_concatation.put(Q_C);
+        exchange_concatation.put(Q_S);
+        exchange_concatation.put(K);
 
         println!("{:?}", ecdh);
 
