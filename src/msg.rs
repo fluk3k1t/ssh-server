@@ -67,7 +67,8 @@ impl Encode for SpString {
         let length = self.len();
 
         let mut bytes = BytesMut::new();
-        bytes.put(&length.to_be_bytes()[..]);
+        // bytes.put_u32(length as u32);
+        bytes.put_u32(length as u32);
 
         bytes.put(&self.to_vec()[..]);
 

@@ -1,4 +1,5 @@
 use bytes::{Buf, BufMut, BytesMut};
+use ed25519_dalek::Signer;
 use ed25519_dalek::pkcs8::KeypairBytes;
 // use ecdsa::VerifyingKey;
 use futures::{SinkExt, Stream, StreamExt};
@@ -126,7 +127,15 @@ impl SshServer {
 
         let I_S = binary_packet.payload.inner;
 
+        // server_keypair
+
         let mut K_S = BytesMut::from(&server_keypair.public_key.unwrap().to_bytes()[..]);
+
+        println!("{:?}", server_keypair.public_key.unwrap());
+        println!(
+            "{:?}",
+            String::from_utf8_lossy(&server_keypair.public_key.unwrap().to_bytes()[..])
+        );
 
         let Q_C = BytesMut::from(&ecdh.client_public_key.to_sec1_bytes()[..]);
 
@@ -136,16 +145,19 @@ impl SshServer {
 
         // let exchange_concatation = format!("{}{}{}", V_C, V_S, I_C);
         let mut exchange_concatation = BytesMut::new();
-        exchange_concatation.put(V_C);
-        exchange_concatation.put(V_S);
-        exchange_concatation.put(I_C);
-        exchange_concatation.put(I_S);
-        exchange_concatation.put(K_S.clone());
-        exchange_concatation.put(Q_C);
-        exchange_concatation.put(Q_S.clone());
-        exchange_concatation.put(K.clone());
+        exchange_concatation.put(SpString::encode(&V_C));
+        exchange_concatation.put(SpString::encode(&V_S));
+        exchange_concatation.put(SpString::encode(&I_C));
+        exchange_concatation.put(SpString::encode(&I_S));
+        exchange_concatation.put(SpString::encode(&K_S.clone()));
+        exchange_concatation.put(SpString::encode(&Q_C));
+        exchange_concatation.put(SpString::encode(&Q_S.clone()));
+        exchange_concatation.put(&mut K.clone());
+        // exchange_concatation.put(&mut BytesMut::from(
+        //     &server_shared.raw_secret_bytes().to_vec()[..],
+        // ));
 
-        let K = Sha256::digest(exchange_concatation);
+        let H = Sha256::digest(exchange_concatation);
 
         let mut ecdh_reply = BytesMut::new();
         ecdh_reply.put_u8(MessageNumber::SSH_MSG_KEX_ECDH_REPLY as u8);
@@ -153,20 +165,21 @@ impl SshServer {
         ecdh_reply.put(SpString::encode(&Q_S));
         // ecdh_reply.put(SpString::parse(&mut Payload::new(K_S))?);
         // ecdh_reply.put(SpString::parse(&mut Payload::new(Q_S))?);
-        ecdh_reply.put(SpString::encode(&BytesMut::from(&K.to_vec()[..])));
+        let sign = server_signing_key.sign(&H);
+        ecdh_reply.put(SpString::encode(&BytesMut::from(&sign.to_bytes()[..])));
 
-        let padding = 9;
-        let mut ecdh_reply_packet = BytesMut::new();
-        ecdh_reply_packet.put_u32(ecdh_reply.len() as u32 + padding as u32 + 1);
-        ecdh_reply_packet.put(ecdh_reply);
-        ecdh_reply_packet.put_bytes(0, padding);
+        // let padding = 9;
+        // let mut ecdh_reply_packet = BytesMut::new();
+        // ecdh_reply_packet.put_u32(ecdh_reply.len() as u32 + padding as u32 + 1);
+        // ecdh_reply_packet.put(ecdh_reply);
+        // ecdh_reply_packet.put_bytes(0, padding);
 
         // writer.get_mut().write_all(&ecdh_reply_packet).await?;
-        writer.send(ecdh_reply_packet).await?;
+        // println!("{:?}", ecdh_reply);
+        dump::<16>(&ecdh_reply);
+        writer.send(ecdh_reply).await?;
 
         // println!("send {:?}", ecdh_reply_packet);
-
-        println!("{:?}", K);
 
         Ok(())
     }
