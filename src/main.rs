@@ -1,7 +1,10 @@
 use bytes::{Buf, BufMut, BytesMut};
+use ed25519_dalek::pkcs8::KeypairBytes;
 // use ecdsa::VerifyingKey;
 use futures::{SinkExt, Stream, StreamExt};
+use p256::ecdh::EphemeralSecret;
 use p256::elliptic_curve::PublicKey;
+use p256::elliptic_curve::rand_core::OsRng;
 use p256::{EncodedPoint, NistP256};
 // use sec1::EncodedPoint;
 use ssh_server::{AlgorithmNegotiation, BinaryPacketDecoder, Encode, Parse};
@@ -30,15 +33,39 @@ async fn main() -> io::Result<()> {
 pub struct SshServer {
     // binary_packet_reader: Framed<TcpStream, BinaryPacketDecoder>,
     stream: TcpStream,
+    client_identification: Option<Identification>,
+}
+
+pub struct Identification {
+    softwareversion: String,
+    protoversion: String,
+}
+
+impl Identification {
+    pub fn new(protoversion: String, softwareversion: String) -> Self {
+        Identification {
+            softwareversion,
+            protoversion,
+        }
+    }
+
+    pub fn encode(&self) -> String {
+        format!("SSH-{}-{}", self.protoversion, self.softwareversion)
+    }
 }
 
 impl SshServer {
     pub fn new(stream: TcpStream) -> Self {
-        Self { stream }
+        Self {
+            stream,
+            client_identification: None,
+        }
     }
 
     pub async fn handle_connection(&mut self) -> io::Result<()> {
-        let (protoversion, softwareversion) = self.excahnge_identification().await?;
+        let client_identification = self.excahnge_identification().await?;
+        self.client_identification = Some(client_identification);
+
         self.exchange_key().await?;
 
         Ok(())
@@ -57,6 +84,8 @@ impl SshServer {
 
         let algo_nego = AlgorithmNegotiation::parse(&mut binary_packet.payload)?;
 
+        println!("{:?}", algo_nego.server_host_key_algorithms);
+
         writer.send(algo_nego).await?;
 
         let mut ecdh = binary_packet_reader
@@ -66,12 +95,44 @@ impl SshServer {
 
         let ecdh = EcdhKex::parse(&mut ecdh.payload)?;
 
+        let server_secret = EphemeralSecret::random(&mut OsRng);
+        let server_shared = server_secret.diffie_hellman(&ecdh.client_public_key);
+        let server_tmp_public = server_secret.public_key();
+
+        let V_C = self
+            .client_identification
+            .as_ref()
+            .unwrap()
+            .encode()
+            .trim_end_matches("\r\n");
+
+        // SigningKey経由でしかKeyPairを生成できないのは不用意にprivateを露出させないみたいな意図があるんでしょうかね
+        // 何にしてもdocs読んで変換探すのがだるいのでやめてほしい所存
+        let server_signing_key = ed25519_dalek::SigningKey::generate(&mut OsRng);
+        let server_keypair = KeypairBytes::from_bytes(&server_signing_key.to_keypair_bytes());
+
+        // KeypairBytes::
+
+        let V_S = "SSH-2.0-OpenSSH_10.0";
+
+        let I_C = binary_packet.payload.inner.clone();
+
+        let I_S = binary_packet.payload.inner;
+
+        let K_S = server_keypair.public_key.unwrap();
+
+        let Q_C = ecdh.client_public_key.to_sec1_bytes();
+
+        let Q_S = server_tmp_public.to_sec1_bytes();
+
+        let K = server_shared.raw_secret_bytes();
+
         println!("{:?}", ecdh);
 
         Ok(())
     }
 
-    async fn excahnge_identification(&mut self) -> io::Result<(String, String)> {
+    async fn excahnge_identification(&mut self) -> io::Result<Identification> {
         let mut buf = BytesMut::new();
 
         loop {
@@ -104,7 +165,7 @@ impl SshServer {
 
         self.stream.write_all(b"SSH-2.0-OpenSSH_10.0\r\n").await?;
 
-        Ok((protoversion, softwareversion))
+        Ok(Identification::new(protoversion, softwareversion))
     }
 
     async fn debug_read(&mut self) -> io::Result<String> {
