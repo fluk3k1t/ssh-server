@@ -112,3 +112,26 @@ impl Default for BinaryPacketEncoder {
         BinaryPacketEncoder
     }
 }
+
+impl Encoder<BytesMut> for BinaryPacketEncoder {
+    type Error = io::Error;
+
+    fn encode(&mut self, item: BytesMut, dst: &mut BytesMut) -> Result<(), Self::Error> {
+        let mut padding_length = 4;
+
+        while (4 + 1 + item.len() + padding_length) % 8 != 0 {
+            padding_length += 1;
+        }
+
+        // println!("{:?} {} {}", padding_length, all_length, all_length % 8,);
+
+        let packet_length = 1 + item.len() + padding_length;
+
+        dst.put_u32(packet_length as u32);
+        dst.put_u8(padding_length as u8);
+        dst.put(item);
+        dst.put_bytes(0, padding_length);
+
+        Ok(())
+    }
+}

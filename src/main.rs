@@ -79,6 +79,7 @@ impl SshServer {
         let (mut read_half, write_half) = self.stream.split();
         let mut binary_packet_reader = FramedRead::new(read_half, BinaryPacketDecoder::default());
 
+        // let mut writer = FramedWrite::new(write_half, BinaryPacketEncoder::default());
         let mut writer = FramedWrite::new(write_half, BinaryPacketEncoder::default());
 
         let mut binary_packet = binary_packet_reader
@@ -90,7 +91,7 @@ impl SshServer {
 
         println!("{:?}", algo_nego.server_host_key_algorithms);
 
-        writer.send(algo_nego).await?;
+        writer.send(algo_nego.encode()).await?;
 
         let mut ecdh = binary_packet_reader
             .next()
@@ -160,9 +161,10 @@ impl SshServer {
         ecdh_reply_packet.put(ecdh_reply);
         ecdh_reply_packet.put_bytes(0, padding);
 
-        writer.get_mut().write_all(&ecdh_reply_packet).await?;
+        // writer.get_mut().write_all(&ecdh_reply_packet).await?;
+        writer.send(ecdh_reply_packet).await?;
 
-        println!("send {:?}", ecdh_reply_packet);
+        // println!("send {:?}", ecdh_reply_packet);
 
         println!("{:?}", K);
 

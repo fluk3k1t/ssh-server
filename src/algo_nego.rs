@@ -99,22 +99,22 @@ impl Encode for AlgorithmNegotiation {
     }
 }
 
-impl Encoder<AlgorithmNegotiation> for BinaryPacketEncoder {
-    type Error = io::Error;
+// impl Encoder<AlgorithmNegotiation> for BinaryPacketEncoder {
+//     type Error = io::Error;
 
-    fn encode(
-        &mut self,
-        item: AlgorithmNegotiation,
-        dst: &mut BytesMut,
-    ) -> Result<(), Self::Error> {
-        let packet = item.encode();
-        let padding: u8 = 14;
+//     fn encode(
+//         &mut self,
+//         item: AlgorithmNegotiation,
+//         dst: &mut BytesMut,
+//     ) -> Result<(), Self::Error> {
+//         let packet = item.encode();
+//         let padding: u8 = 14;
 
-        dst.put_u32(packet.len() as u32 + padding as u32 + 1);
-        dst.put_u8(padding);
-        dst.extend_from_slice(&packet);
-        dst.put_bytes(0, padding as usize);
+//         dst.put_u32(packet.len() as u32 + padding as u32 + 1);
+//         dst.put_u8(padding);
+//         dst.extend_from_slice(&packet);
+//         dst.put_bytes(0, padding as usize);
 
-        Ok(())
-    }
-}
+//         Ok(())
+//     }
+// }
