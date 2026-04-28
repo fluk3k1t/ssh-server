@@ -1,7 +1,11 @@
-use bytes::{BufMut, BytesMut};
+use bytes::{Buf, BufMut, BytesMut};
+// use ecdsa::VerifyingKey;
 use futures::{SinkExt, Stream, StreamExt};
-use ssh_server::BinaryPacketEncoder;
+use p256::elliptic_curve::PublicKey;
+use p256::{EncodedPoint, NistP256};
+// use sec1::EncodedPoint;
 use ssh_server::{AlgorithmNegotiation, BinaryPacketDecoder, Encode, Parse};
+use ssh_server::{BinaryPacketEncoder, EcdhKex};
 use std::io::{self, Error, Sink};
 use tokio::io::AsyncWrite;
 use tokio::{
@@ -9,6 +13,7 @@ use tokio::{
     net::{TcpListener, TcpStream},
 };
 // use tokio_stream::StreamExt;
+use p256::ecdsa::{VerifyingKey, signature::Verifier};
 use tokio_util::codec::{Framed, FramedRead, FramedWrite};
 
 #[tokio::main]
@@ -40,50 +45,28 @@ impl SshServer {
     }
 
     async fn exchange_key(&mut self) -> io::Result<()> {
-        let (read_half, mut write_half) = self.stream.split();
+        let (mut read_half, write_half) = self.stream.split();
         let mut binary_packet_reader = FramedRead::new(read_half, BinaryPacketDecoder::default());
 
-        // let mut writer = FramedWrite::new(write_half, BinaryPacketEncoder::default());
+        let mut writer = FramedWrite::new(write_half, BinaryPacketEncoder::default());
 
         let mut binary_packet = binary_packet_reader
             .next()
             .await
             .ok_or(Error::other("failed to reed binary packet"))??;
 
-        println!("{:?}", binary_packet.payload.inner);
+        let algo_nego = AlgorithmNegotiation::parse(&mut binary_packet.payload)?;
 
-        let mut algo_nego = AlgorithmNegotiation::parse(&mut binary_packet.payload)?;
+        writer.send(algo_nego).await?;
 
-        // println!("{:#?}", algo_nego);
+        let mut ecdh = binary_packet_reader
+            .next()
+            .await
+            .ok_or(Error::other("failed to reed binary packet"))??;
 
-        let mut packet = algo_nego.encode();
-        let mut bytes = BytesMut::new();
+        let ecdh = EcdhKex::parse(&mut ecdh.payload)?;
 
-        let padding: u8 = 4;
-
-        bytes.put_u32(packet.len() as u32 + padding as u32 + 1);
-        bytes.put_u8(padding);
-        bytes.extend_from_slice(&packet);
-        bytes.put_bytes(0, padding as usize);
-
-        println!("{:?}", bytes);
-
-        // write_half.write_all(&algo_nego.encode()).await?;
-        write_half.write_all(&bytes).await?;
-
-        // writer.send(algo_nego).await?;
-        // Stream
-        // StreamExt
-        // binary_packet_reader.write
-        // Sink
-        // writer.write_all(algo_nego);
-        // Sink
-        // AsyncWriteExt
-        // AsyncWrite
-
-        // binary_packet_reader
-
-        // self.stream.write_atll_buf(&mut algo_nego.encode()).await?;
+        println!("{:?}", ecdh);
 
         Ok(())
     }
@@ -130,5 +113,11 @@ impl SshServer {
         self.stream.read_buf(&mut buf).await?;
 
         Ok(String::from_utf8_lossy(&buf).to_string())
+    }
+}
+
+fn dump<const N: usize>(src: &BytesMut) {
+    for row in src.chunks(N) {
+        println!("{:02x?}", row);
     }
 }

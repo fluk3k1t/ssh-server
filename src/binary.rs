@@ -1,11 +1,11 @@
 use std::{cmp::min, io};
 
-use bytes::Buf;
+use bytes::{Buf, BufMut};
 use tokio_util::codec::{Decoder, Encoder};
 
 use bytes::BytesMut;
 
-use crate::{AlgorithmNegotiation, Encode};
+use crate::Encode;
 
 #[derive(Debug)]
 pub struct BinaryPacket {
@@ -25,6 +25,7 @@ impl Payload {
     }
 }
 
+#[derive(Debug)]
 pub enum BinaryPacketDecoder {
     Header,
     Payload(usize, usize, Vec<u8>),
@@ -44,8 +45,15 @@ impl Decoder for BinaryPacketDecoder {
     fn decode(&mut self, src: &mut bytes::BytesMut) -> Result<Option<Self::Item>, Self::Error> {
         match self {
             BinaryPacketDecoder::Header => {
+                if src.remaining() < size_of::<u32>() + size_of::<u8>() {
+                    return Ok(None);
+                }
+
                 let packet_length = src.get_u32() as usize;
                 let padding_length = src.get_u8() as usize;
+
+                println!("pakcet length {}", packet_length);
+                println!("padding_length {}", padding_length);
 
                 *self = BinaryPacketDecoder::Payload(
                     packet_length - padding_length - 1,
@@ -58,6 +66,8 @@ impl Decoder for BinaryPacketDecoder {
             BinaryPacketDecoder::Payload(payload_remaining, padding_remaining, payload) => {
                 let reading_length = min(*payload_remaining, src.remaining());
                 *payload_remaining = payload_remaining.saturating_sub(reading_length);
+
+                // println!("spliteto");
 
                 payload.extend_from_slice(&src.split_to(reading_length));
 
@@ -73,12 +83,21 @@ impl Decoder for BinaryPacketDecoder {
                 let reading_length = min(*padding_remaining, src.remaining());
                 *padding_remaining = padding_remaining.saturating_sub(reading_length);
 
+                // println!("advance");
+
                 src.advance(reading_length);
 
                 match *padding_remaining {
-                    0 => Ok(Some(BinaryPacket {
-                        payload: Payload::new(BytesMut::from_iter(payload.clone())),
-                    })),
+                    0 => {
+                        let payload = payload.clone();
+
+                        *self = BinaryPacketDecoder::Header;
+                        src.clear();
+
+                        Ok(Some(BinaryPacket {
+                            payload: Payload::new(BytesMut::from_iter(payload)),
+                        }))
+                    }
                     _ => Ok(None),
                 }
             }
@@ -86,22 +105,10 @@ impl Decoder for BinaryPacketDecoder {
     }
 }
 
-pub struct BinaryPacketEncoder {}
+pub struct BinaryPacketEncoder;
 
 impl Default for BinaryPacketEncoder {
     fn default() -> Self {
-        BinaryPacketEncoder {}
-    }
-}
-
-impl Encoder<AlgorithmNegotiation> for BinaryPacketEncoder {
-    type Error = io::Error;
-
-    fn encode(
-        &mut self,
-        item: AlgorithmNegotiation,
-        dst: &mut BytesMut,
-    ) -> Result<(), Self::Error> {
-        Ok(dst.extend_from_slice(&item.encode()))
+        BinaryPacketEncoder
     }
 }
