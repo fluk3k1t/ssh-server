@@ -6,8 +6,11 @@ use p256::ecdh::EphemeralSecret;
 use p256::elliptic_curve::PublicKey;
 use p256::elliptic_curve::rand_core::OsRng;
 use p256::{EncodedPoint, NistP256};
+use sha2::{Digest, Sha256};
 // use sec1::EncodedPoint;
-use ssh_server::{AlgorithmNegotiation, BinaryPacketDecoder, Encode, Parse};
+use ssh_server::{
+    AlgorithmNegotiation, BinaryPacketDecoder, Encode, MessageNumber, Parse, Payload, SpString,
+};
 use ssh_server::{BinaryPacketEncoder, EcdhKex};
 use std::io::{self, Error, Sink};
 use tokio::io::AsyncWrite;
@@ -81,7 +84,7 @@ impl SshServer {
         let mut binary_packet = binary_packet_reader
             .next()
             .await
-            .ok_or(Error::other("failed to reed binary packet"))??;
+            .ok_or(Error::other("failed to read binary packet"))??;
 
         let algo_nego = AlgorithmNegotiation::parse(&mut binary_packet.payload)?;
 
@@ -92,7 +95,7 @@ impl SshServer {
         let mut ecdh = binary_packet_reader
             .next()
             .await
-            .ok_or(Error::other("failed to reed binary packet"))??;
+            .ok_or(Error::other("failed to read binary packet"))??;
 
         let ecdh = EcdhKex::parse(&mut ecdh.payload)?;
 
@@ -122,7 +125,7 @@ impl SshServer {
 
         let I_S = binary_packet.payload.inner;
 
-        let K_S = BytesMut::from(&server_keypair.public_key.unwrap().to_bytes()[..]);
+        let mut K_S = BytesMut::from(&server_keypair.public_key.unwrap().to_bytes()[..]);
 
         let Q_C = BytesMut::from(&ecdh.client_public_key.to_sec1_bytes()[..]);
 
@@ -136,12 +139,32 @@ impl SshServer {
         exchange_concatation.put(V_S);
         exchange_concatation.put(I_C);
         exchange_concatation.put(I_S);
-        exchange_concatation.put(K_S);
+        exchange_concatation.put(K_S.clone());
         exchange_concatation.put(Q_C);
-        exchange_concatation.put(Q_S);
-        exchange_concatation.put(K);
+        exchange_concatation.put(Q_S.clone());
+        exchange_concatation.put(K.clone());
 
-        println!("{:?}", ecdh);
+        let K = Sha256::digest(exchange_concatation);
+
+        let mut ecdh_reply = BytesMut::new();
+        ecdh_reply.put_u8(MessageNumber::SSH_MSG_KEX_ECDH_REPLY as u8);
+        ecdh_reply.put(SpString::encode(&K_S));
+        ecdh_reply.put(SpString::encode(&Q_S));
+        // ecdh_reply.put(SpString::parse(&mut Payload::new(K_S))?);
+        // ecdh_reply.put(SpString::parse(&mut Payload::new(Q_S))?);
+        ecdh_reply.put(SpString::encode(&BytesMut::from(&K.to_vec()[..])));
+
+        let padding = 9;
+        let mut ecdh_reply_packet = BytesMut::new();
+        ecdh_reply_packet.put_u32(ecdh_reply.len() as u32 + padding as u32 + 1);
+        ecdh_reply_packet.put(ecdh_reply);
+        ecdh_reply_packet.put_bytes(0, padding);
+
+        writer.get_mut().write_all(&ecdh_reply_packet).await?;
+
+        println!("send {:?}", ecdh_reply_packet);
+
+        println!("{:?}", K);
 
         Ok(())
     }

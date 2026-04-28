@@ -108,7 +108,7 @@ impl Encoder<AlgorithmNegotiation> for BinaryPacketEncoder {
         dst: &mut BytesMut,
     ) -> Result<(), Self::Error> {
         let packet = item.encode();
-        let padding: u8 = 4;
+        let padding: u8 = 14;
 
         dst.put_u32(packet.len() as u32 + padding as u32 + 1);
         dst.put_u8(padding);

@@ -16,6 +16,7 @@ pub trait Encode: Sized {
 pub enum MessageNumber {
     SSH_MSG_KEXINIT = 20,
     SSH_MSG_KEX_ECDH_INIT = 30,
+    SSH_MSG_KEX_ECDH_REPLY = 31,
 }
 
 #[derive(Debug)]
@@ -58,6 +59,19 @@ impl Parse for SpString {
         let str = src.inner.split_to(length as usize);
 
         Ok(str)
+    }
+}
+
+impl Encode for SpString {
+    fn encode(&self) -> BytesMut {
+        let length = self.len();
+
+        let mut bytes = BytesMut::new();
+        bytes.put(&length.to_be_bytes()[..]);
+
+        bytes.put(&self.to_vec()[..]);
+
+        bytes
     }
 }
 
