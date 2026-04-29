@@ -6,11 +6,14 @@ use futures::{SinkExt, Stream, StreamExt};
 use p256::ecdh::EphemeralSecret;
 use p256::elliptic_curve::PublicKey;
 use p256::elliptic_curve::rand_core::OsRng;
+use p256::pkcs8::{DecodePublicKey, EncodePublicKey};
 use p256::{EncodedPoint, NistP256};
 use sha2::{Digest, Sha256};
+// use ssh_key::PublicKey;
 // use sec1::EncodedPoint;
 use ssh_server::{
-    AlgorithmNegotiation, BinaryPacketDecoder, Encode, MessageNumber, Parse, Payload, SpString,
+    AlgorithmNegotiation, BinaryPacketDecoder, Encode, MessageNumber, NameList, Parse, Payload,
+    SpString,
 };
 use ssh_server::{BinaryPacketEncoder, EcdhKex};
 use std::io::{self, Error, Sink};
@@ -59,6 +62,29 @@ impl Identification {
     }
 }
 
+use ssh_encoding::Writer;
+pub(crate) fn encode_mpint(s: &[u8], w: &mut BytesMut) -> Result<(), ssh_encoding::Error> {
+    use ssh_encoding::Encode;
+    // Skip initial 0s.
+    let mut i = 0;
+    while i < s.len() && s[i] == 0 {
+        i += 1
+    }
+    // If the first non-zero is >= 128, write its length (u32, BE), followed by 0.
+    if s[i] & 0x80 != 0 {
+        // ((s.len() - i + 1) as u32).encode(w)?;
+        w.put_u32(((s.len() - i + 1) as u32));
+        // 0u8.encode(w)?;
+        w.put_u8(0);
+    } else {
+        // ((s.len() - i) as u32).encode(w)?;
+        w.put_u32(((s.len() - i) as u32));
+    }
+    w.extend_from_slice(&s[i..]);
+
+    Ok(())
+}
+
 impl SshServer {
     pub fn new(stream: TcpStream) -> Self {
         Self {
@@ -90,9 +116,15 @@ impl SshServer {
 
         let algo_nego = AlgorithmNegotiation::parse(&mut binary_packet.payload)?;
 
-        println!("{:?}", algo_nego.server_host_key_algorithms);
+        let mut server_algo_nego = algo_nego;
+        server_algo_nego.server_host_key_algorithms =
+            NameList::new(vec!["ssh-ed25519".to_string()]);
 
-        writer.send(algo_nego.encode()).await?;
+        println!("{:?}", server_algo_nego.server_host_key_algorithms);
+
+        let server_algo_nego_encoded = server_algo_nego.encode();
+
+        writer.send(server_algo_nego_encoded.clone()).await?;
 
         let mut ecdh = binary_packet_reader
             .next()
@@ -101,7 +133,15 @@ impl SshServer {
 
         let ecdh = EcdhKex::parse(&mut ecdh.payload)?;
 
+        // SigningKey経由でしかKeyPairを生成できないのは不用意にprivateを露出させないみたいな意図があるんでしょうかね
+        // 何にしてもdocs読んで型変換探すのがだるいのでやめてほしい所存
+        let server_signing_key = ed25519_dalek::SigningKey::generate(&mut OsRng);
+
+        // サーバー側では秘密鍵を保持しておいて二回目以降で使い回し、クライアントは初回に送信された公開鍵を保存しておいて二回目以降で照合してmitmを防ぐ的な
+        // WARNING: REMOTE HOST IDENTIFICATION HAS CHANGED! の話
+        let server_keypair = KeypairBytes::from_bytes(&server_signing_key.to_keypair_bytes());
         let server_secret = EphemeralSecret::random(&mut OsRng);
+
         let server_shared = server_secret.diffie_hellman(&ecdh.client_public_key);
         let server_tmp_public = server_secret.public_key();
 
@@ -111,75 +151,57 @@ impl SshServer {
 
         let V_C = BytesMut::from(V_C);
 
-        // SigningKey経由でしかKeyPairを生成できないのは不用意にprivateを露出させないみたいな意図があるんでしょうかね
-        // 何にしてもdocs読んで型変換探すのがだるいのでやめてほしい所存
-        let server_signing_key = ed25519_dalek::SigningKey::generate(&mut OsRng);
-
-        // サーバー側では秘密鍵を保持しておいて二回目以降で使い回し、クライアントは初回に送信された公開鍵を保存しておいて二回目以降で照合してmitmを防ぐ的な
-        // WARNING: REMOTE HOST IDENTIFICATION HAS CHANGED! の話
-        let server_keypair = KeypairBytes::from_bytes(&server_signing_key.to_keypair_bytes());
-
-        // KeypairBytes::
-
         let V_S = BytesMut::from("SSH-2.0-OpenSSH_10.0");
 
         let I_C = binary_packet.payload.inner.clone();
 
-        let I_S = binary_packet.payload.inner;
+        let I_S = server_algo_nego_encoded;
+        let mut K_S_NAME = BytesMut::from("ssh-ed25519");
+        let mut K_S_KEY = BytesMut::from(&server_keypair.public_key.unwrap().to_bytes()[..]);
+        let mut k_s = BytesMut::new();
+        k_s.put(SpString::encode(&K_S_NAME));
+        k_s.put(SpString::encode(&K_S_KEY));
 
-        // server_keypair
-
-        let mut K_S = BytesMut::from(&server_keypair.public_key.unwrap().to_bytes()[..]);
-
-        println!("{:?}", server_keypair.public_key.unwrap());
-        println!(
-            "{:?}",
-            String::from_utf8_lossy(&server_keypair.public_key.unwrap().to_bytes()[..])
-        );
+        // ecdh_reply.put(SpString::encode(&k_s));
+        // println!("{:?}", K_S);
 
         let Q_C = BytesMut::from(&ecdh.client_public_key.to_sec1_bytes()[..]);
 
         let Q_S = BytesMut::from(&server_tmp_public.to_sec1_bytes()[..]);
 
-        let K = BytesMut::from(server_shared.raw_secret_bytes().as_slice());
+        // let K = BytesMut::from(server_shared.raw_secret_bytes().as_slice());
+        let mut K = BytesMut::new();
+        encode_mpint(server_shared.raw_secret_bytes(), &mut K).unwrap();
 
-        // let exchange_concatation = format!("{}{}{}", V_C, V_S, I_C);
         let mut exchange_concatation = BytesMut::new();
         exchange_concatation.put(SpString::encode(&V_C));
         exchange_concatation.put(SpString::encode(&V_S));
         exchange_concatation.put(SpString::encode(&I_C));
         exchange_concatation.put(SpString::encode(&I_S));
-        exchange_concatation.put(SpString::encode(&K_S.clone()));
+        exchange_concatation.put(SpString::encode(&k_s.clone()));
+        // exchange_concatation.put(SpString::encode(&K_S_KEY.clone()));
         exchange_concatation.put(SpString::encode(&Q_C));
         exchange_concatation.put(SpString::encode(&Q_S.clone()));
         exchange_concatation.put(&mut K.clone());
-        // exchange_concatation.put(&mut BytesMut::from(
-        //     &server_shared.raw_secret_bytes().to_vec()[..],
-        // ));
 
         let H = Sha256::digest(exchange_concatation);
 
         let mut ecdh_reply = BytesMut::new();
         ecdh_reply.put_u8(MessageNumber::SSH_MSG_KEX_ECDH_REPLY as u8);
-        ecdh_reply.put(SpString::encode(&K_S));
+        // ecdh_reply.put(SpString::encode(&K_S_NAME));
+        // ecdh_reply.put(SpString::encode(&K_S_KEY));
+        ecdh_reply.put(SpString::encode(&k_s));
         ecdh_reply.put(SpString::encode(&Q_S));
-        // ecdh_reply.put(SpString::parse(&mut Payload::new(K_S))?);
-        // ecdh_reply.put(SpString::parse(&mut Payload::new(Q_S))?);
         let sign = server_signing_key.sign(&H);
-        ecdh_reply.put(SpString::encode(&BytesMut::from(&sign.to_bytes()[..])));
+        let mut sig_blob = BytesMut::new();
+        sig_blob.put(SpString::encode(&BytesMut::from("ssh-ed25519")));
+        sig_blob.put(SpString::encode(&BytesMut::from(&sign.to_bytes()[..])));
 
-        // let padding = 9;
-        // let mut ecdh_reply_packet = BytesMut::new();
-        // ecdh_reply_packet.put_u32(ecdh_reply.len() as u32 + padding as u32 + 1);
-        // ecdh_reply_packet.put(ecdh_reply);
-        // ecdh_reply_packet.put_bytes(0, padding);
+        ecdh_reply.put(SpString::encode(&sig_blob));
+        // ecdh_reply.put(SpString::encode(&BytesMut::from(&sign.to_bytes()[..])));
 
-        // writer.get_mut().write_all(&ecdh_reply_packet).await?;
-        // println!("{:?}", ecdh_reply);
         dump::<16>(&ecdh_reply);
         writer.send(ecdh_reply).await?;
-
-        // println!("send {:?}", ecdh_reply_packet);
 
         Ok(())
     }
