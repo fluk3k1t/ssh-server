@@ -116,7 +116,7 @@ impl SshServer {
 
         let algo_nego = AlgorithmNegotiation::parse(&mut binary_packet.payload)?;
 
-        let mut server_algo_nego = algo_nego;
+        let mut server_algo_nego = algo_nego.clone();
         server_algo_nego.server_host_key_algorithms =
             NameList::new(vec!["ssh-ed25519".to_string()]);
 
@@ -152,13 +152,13 @@ impl SshServer {
         let V_C = BytesMut::from(V_C);
 
         let V_S = BytesMut::from("SSH-2.0-OpenSSH_10.0");
-
-        let I_C = binary_packet.payload.inner.clone();
+        let I_C = algo_nego.encode();
 
         let I_S = server_algo_nego_encoded;
         let mut K_S_NAME = BytesMut::from("ssh-ed25519");
         let mut K_S_KEY = BytesMut::from(&server_keypair.public_key.unwrap().to_bytes()[..]);
         let mut k_s = BytesMut::new();
+
         k_s.put(SpString::encode(&K_S_NAME));
         k_s.put(SpString::encode(&K_S_KEY));
 
@@ -174,6 +174,8 @@ impl SshServer {
         encode_mpint(server_shared.raw_secret_bytes(), &mut K).unwrap();
 
         let mut exchange_concatation = BytesMut::new();
+        // V_C.encode
+
         exchange_concatation.put(SpString::encode(&V_C));
         exchange_concatation.put(SpString::encode(&V_S));
         exchange_concatation.put(SpString::encode(&I_C));
@@ -188,10 +190,9 @@ impl SshServer {
 
         let mut ecdh_reply = BytesMut::new();
         ecdh_reply.put_u8(MessageNumber::SSH_MSG_KEX_ECDH_REPLY as u8);
-        // ecdh_reply.put(SpString::encode(&K_S_NAME));
-        // ecdh_reply.put(SpString::encode(&K_S_KEY));
         ecdh_reply.put(SpString::encode(&k_s));
         ecdh_reply.put(SpString::encode(&Q_S));
+
         let sign = server_signing_key.sign(&H);
         let mut sig_blob = BytesMut::new();
         sig_blob.put(SpString::encode(&BytesMut::from("ssh-ed25519")));

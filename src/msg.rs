@@ -1,6 +1,6 @@
 use std::{collections::VecDeque, io};
 
-use bytes::{Buf, BufMut, BytesMut};
+use bytes::{Buf, BufMut, Bytes, BytesMut};
 
 use crate::Payload;
 
@@ -12,14 +12,14 @@ pub trait Encode: Sized {
     fn encode(&self) -> BytesMut;
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum MessageNumber {
     SSH_MSG_KEXINIT = 20,
     SSH_MSG_KEX_ECDH_INIT = 30,
     SSH_MSG_KEX_ECDH_REPLY = 31,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct NameList {
     inner: Vec<String>,
 }
@@ -76,6 +76,14 @@ impl Encode for SpString {
     }
 }
 
+impl EncodeToBytesMut for SpString {
+    fn encode(&self, dst: &mut BytesMut) {
+        let length = self.len();
+        dst.put_u32(length as u32);
+        dst.put(&self.to_vec()[..]);
+    }
+}
+
 pub fn parse_name_list(src: &mut BytesMut) -> io::Result<NameList> {
     let length = src.get_u32();
     let name_list = String::from_utf8_lossy(&src.split_to(length as usize))
@@ -84,4 +92,49 @@ pub fn parse_name_list(src: &mut BytesMut) -> io::Result<NameList> {
         .collect::<Vec<_>>();
 
     Ok(NameList::from(name_list))
+}
+
+pub trait EncodeToBytesMut {
+    fn encode(&self, dst: &mut BytesMut);
+}
+
+#[derive(Debug, Clone)]
+pub struct Message {
+    message_number: MessageNumber,
+    buffer: BytesMut,
+}
+
+impl Message {
+    pub fn new(message_number: MessageNumber) -> Message {
+        Message {
+            message_number,
+            buffer: BytesMut::new(),
+        }
+    }
+
+    pub fn ssh_string(self, str: String) -> Message {
+        self.extend(BytesMut::from(&str[..]))
+    }
+
+    pub fn extend(mut self, item: impl EncodeToBytesMut) -> Message {
+        item.encode(&mut self.buffer);
+        self
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct SshString {
+    src: Bytes,
+}
+
+impl SshString {
+    pub fn new(src: impl Into<Bytes>) -> SshString {
+        SshString { src: src.into() }
+    }
+}
+
+impl EncodeToBytesMut for SshString {
+    fn encode(&self, dst: &mut BytesMut) {
+        dst.extend(&self.src);
+    }
 }

@@ -7,7 +7,7 @@ use crate::{
     BinaryPacketEncoder, Encode, MessageNumber, NameList, Parse, Payload, parse_name_list,
 };
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct AlgorithmNegotiation {
     pub cookie: [u8; 16],
     pub kex_algorithms: NameList,
