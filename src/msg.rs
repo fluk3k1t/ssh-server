@@ -101,22 +101,51 @@ pub trait EncodeToBytesMut {
 #[derive(Debug, Clone)]
 pub struct Message {
     message_number: MessageNumber,
-    buffer: BytesMut,
+    pub buffer: BytesMut,
 }
 
 impl Message {
     pub fn new(message_number: MessageNumber) -> Message {
+        let mut buffer = BytesMut::new();
+        buffer.put_u8(message_number.clone() as u8);
+
         Message {
             message_number,
-            buffer: BytesMut::new(),
+            buffer,
         }
     }
 
     pub fn ssh_string(self, str: String) -> Message {
-        self.extend(BytesMut::from(&str[..]))
+        self.extend(SshString::new(str))
     }
 
     pub fn extend(mut self, item: impl EncodeToBytesMut) -> Message {
+        item.encode(&mut self.buffer);
+        self
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct ByteStream {
+    pub buffer: BytesMut,
+}
+
+impl ByteStream {
+    pub fn new() -> ByteStream {
+        ByteStream {
+            buffer: BytesMut::new(),
+        }
+    }
+
+    pub fn ssh_string(self, str: impl Into<BytesMut>) -> ByteStream {
+        self.extend(SshString::new(str.into()))
+    }
+
+    pub fn ssh_mpint(self, src: impl Into<BytesMut>) -> ByteStream {
+        self.extend(SshMpInt::new(src.into()))
+    }
+
+    pub fn extend(mut self, item: impl EncodeToBytesMut) -> ByteStream {
         item.encode(&mut self.buffer);
         self
     }
@@ -135,6 +164,80 @@ impl SshString {
 
 impl EncodeToBytesMut for SshString {
     fn encode(&self, dst: &mut BytesMut) {
+        dst.put_u32(self.src.len() as u32);
         dst.extend(&self.src);
+    }
+}
+
+use ssh_encoding::Writer;
+pub(crate) fn encode_mpint(s: &[u8], w: &mut BytesMut) -> Result<(), ssh_encoding::Error> {
+    use ssh_encoding::Encode;
+    // Skip initial 0s.
+    let mut i = 0;
+    while i < s.len() && s[i] == 0 {
+        i += 1
+    }
+    // If the first non-zero is >= 128, write its length (u32, BE), followed by 0.
+    if s[i] & 0x80 != 0 {
+        // ((s.len() - i + 1) as u32).encode(w)?;
+        w.put_u32(((s.len() - i + 1) as u32));
+        // 0u8.encode(w)?;
+        w.put_u8(0);
+    } else {
+        // ((s.len() - i) as u32).encode(w)?;
+        w.put_u32(((s.len() - i) as u32));
+    }
+    w.extend_from_slice(&s[i..]);
+
+    Ok(())
+}
+
+#[derive(Debug, Clone)]
+pub struct SshMpInt {
+    src: Bytes,
+}
+
+impl SshMpInt {
+    pub fn new(src: impl Into<Bytes>) -> SshMpInt {
+        SshMpInt { src: src.into() }
+    }
+}
+
+impl EncodeToBytesMut for SshMpInt {
+    fn encode(&self, dst: &mut BytesMut) {
+        encode_mpint(&self.src, dst).unwrap();
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct SshPublicKey {
+    format_identifier: String,
+    blob: BytesMut,
+}
+
+impl SshPublicKey {
+    pub fn new(format_identifier: impl Into<String>, blob: BytesMut) -> Self {
+        SshPublicKey {
+            format_identifier: format_identifier.into(),
+            blob: blob.into(),
+        }
+    }
+
+    pub fn encoded(&self) -> BytesMut {
+        let mut bytes = BytesMut::new();
+        self.encode(&mut bytes);
+
+        bytes
+    }
+}
+
+impl EncodeToBytesMut for SshPublicKey {
+    fn encode(&self, dst: &mut BytesMut) {
+        let format_identifier = self.format_identifier.clone();
+        let format_identifier = SshString::new(format_identifier);
+        format_identifier.encode(dst);
+
+        SshString::new(self.blob.to_vec()).encode(dst);
+        // dst.extend(&self.blob);
     }
 }

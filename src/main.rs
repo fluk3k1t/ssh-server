@@ -2,18 +2,22 @@ use bytes::{Buf, BufMut, BytesMut};
 use ed25519_dalek::Signer;
 use ed25519_dalek::pkcs8::KeypairBytes;
 // use ecdsa::VerifyingKey;
+use bytes::Bytes;
 use futures::{SinkExt, Stream, StreamExt};
 use p256::ecdh::EphemeralSecret;
+use p256::ecdsa::Signature;
+use p256::ecdsa::signature::SignerMut;
 use p256::elliptic_curve::PublicKey;
 use p256::elliptic_curve::rand_core::OsRng;
+use p256::elliptic_curve::sec1::ToEncodedPoint;
 use p256::pkcs8::{DecodePublicKey, EncodePublicKey};
-use p256::{EncodedPoint, NistP256};
+use p256::{EncodedPoint, NistP256, ecdsa};
 use sha2::{Digest, Sha256};
 // use ssh_key::PublicKey;
 // use sec1::EncodedPoint;
 use ssh_server::{
-    AlgorithmNegotiation, BinaryPacketDecoder, Encode, MessageNumber, NameList, Parse, Payload,
-    SpString,
+    AlgorithmNegotiation, BinaryPacketDecoder, ByteStream, Encode, EncodeToBytesMut, Message,
+    MessageNumber, NameList, Parse, Payload, SpString, SshMpInt, SshPublicKey, SshString,
 };
 use ssh_server::{BinaryPacketEncoder, EcdhKex};
 use std::io::{self, Error, Sink};
@@ -57,32 +61,11 @@ impl Identification {
         }
     }
 
-    pub fn encode(&self) -> String {
+    pub fn as_crlf_excluded_str(&self) -> String {
         format!("SSH-{}-{}", self.protoversion, self.softwareversion)
+            .trim_end_matches("\r\n")
+            .to_string()
     }
-}
-
-use ssh_encoding::Writer;
-pub(crate) fn encode_mpint(s: &[u8], w: &mut BytesMut) -> Result<(), ssh_encoding::Error> {
-    use ssh_encoding::Encode;
-    // Skip initial 0s.
-    let mut i = 0;
-    while i < s.len() && s[i] == 0 {
-        i += 1
-    }
-    // If the first non-zero is >= 128, write its length (u32, BE), followed by 0.
-    if s[i] & 0x80 != 0 {
-        // ((s.len() - i + 1) as u32).encode(w)?;
-        w.put_u32(((s.len() - i + 1) as u32));
-        // 0u8.encode(w)?;
-        w.put_u8(0);
-    } else {
-        // ((s.len() - i) as u32).encode(w)?;
-        w.put_u32(((s.len() - i) as u32));
-    }
-    w.extend_from_slice(&s[i..]);
-
-    Ok(())
 }
 
 impl SshServer {
@@ -97,12 +80,141 @@ impl SshServer {
         let client_identification = self.excahnge_identification().await?;
         self.client_identification = Some(client_identification);
 
-        self.exchange_key().await?;
+        self.key_exchange().await?;
 
         Ok(())
     }
 
-    async fn exchange_key(&mut self) -> io::Result<()> {
+    async fn key_exchange(&mut self) -> io::Result<()> {
+        let (client_algorithm, i_c_raw, i_s_raw) = self.alghorithm_negotiation().await?;
+
+        println!("{:?}", client_algorithm.server_host_key_algorithms);
+
+        // TODO: self.algorithm_negotiationで応答したものを使用すべき
+        let mut server_algo_nego = client_algorithm.clone();
+        server_algo_nego.server_host_key_algorithms =
+            // NameList::new(vec!["ecdsa-sha2-nistp256-cert-v01@openssh.com".to_string()]);
+        // server_algo_nego.server_host_key_algorithms =
+            NameList::new(vec!["ecdsa-sha2-nistp256".to_string()]);
+        // println!("{:?}", client_algorithm.server_host_key_algorithms);
+
+        let (mut read_half, write_half) = self.stream.split();
+        let mut binary_packet_reader = FramedRead::new(read_half, BinaryPacketDecoder::default());
+
+        let mut ecdh = binary_packet_reader
+            .next()
+            .await
+            .ok_or(Error::other("failed to read binary packet"))??;
+
+        let ecdh = EcdhKex::parse(&mut ecdh.payload)?;
+        let server_signing_key = ecdsa::SigningKey::random(&mut OsRng);
+        let server_secret = EphemeralSecret::random(&mut OsRng);
+        let server_shared = server_secret.diffie_hellman(&ecdh.client_public_key);
+        let server_tmp_public = server_secret.public_key();
+        let verifying_key = server_signing_key.verifying_key();
+        let q = verifying_key.to_encoded_point(false);
+        let mut pubkey_blob = BytesMut::new();
+        SshString::new("ecdsa-sha2-nistp256").encode(&mut pubkey_blob);
+        SshString::new("nistp256").encode(&mut pubkey_blob);
+        SshString::new(q.as_bytes().to_vec()).encode(&mut pubkey_blob);
+        let k_s = SshString::new(pubkey_blob.clone());
+        let v_c = self
+            .client_identification
+            .as_ref()
+            .unwrap()
+            .as_crlf_excluded_str();
+        // );
+        // let v_s = SshString::new("SSH-2.0-OpenSSH_10.0");
+        // let i_c = SshString::new(i_c_raw);
+        // let i_s = SshString::new(i_s_raw);
+        // let q_c = SshString::new(ecdh.client_public_key.to_sec1_bytes());
+        let q_s = SshString::new(server_tmp_public.to_encoded_point(false).to_bytes());
+
+        let k = SshMpInt::new(server_shared.raw_secret_bytes().to_vec());
+
+        // let exchange_concatation = ByteStream::new()
+        //     .ssh_string(v_c.as_bytes())
+        //     .ssh_string("SSH-2.0-OpenSSH_10.0")
+        //     .ssh_string(i_c_raw)
+        //     .ssh_string(i_s_raw)
+        //     .ssh_string(pubkey_blob)
+        //     .ssh_string(&ecdh.client_public_key.to_sec1_bytes()[..])
+        //     .ssh_string(&server_tmp_public.to_sec1_bytes()[..])
+        //     .ssh_mpint(&server_shared.raw_secret_bytes()[..]);
+        let exchange_concatation = ByteStream::new()
+            .ssh_string(
+                self.client_identification
+                    .as_ref()
+                    .unwrap()
+                    .as_crlf_excluded_str()
+                    .as_bytes(),
+            ) // V_C
+            .ssh_string("SSH-2.0-OpenSSH_10.0") // V_S
+            .ssh_string(i_c_raw) // I_C
+            .ssh_string(i_s_raw) // I_S
+            .ssh_string(pubkey_blob.clone()) // K_S
+            .ssh_string(
+                ecdh.client_public_key.to_encoded_point(false).as_bytes(), // .to_vec(),
+            ) // Q_C
+            .ssh_string(
+                server_tmp_public.to_encoded_point(false).as_bytes(), // .to_vec(),
+            ) // Q_S
+            .ssh_mpint(&server_shared.raw_secret_bytes()[..]);
+        // .ssh_mpint(server_shared.raw_secret_bytes()); // K
+
+        let h = Sha256::digest(exchange_concatation.buffer);
+
+        let sign: Signature = server_signing_key.sign(&h);
+
+        let mut sign_blob = BytesMut::new();
+        SshString::new("ecdsa-sha2-nistp256").encode(&mut sign_blob);
+
+        let mut sign_blob_text = BytesMut::new();
+        SshMpInt::new(sign.r().to_bytes().to_vec()).encode(&mut sign_blob_text);
+        SshMpInt::new(sign.s().to_bytes().to_vec()).encode(&mut sign_blob_text);
+
+        SshString::new(sign_blob_text.to_vec()).encode(&mut sign_blob);
+        // SshString::new(sign.to_vec()).encode(&mut sign_blob);
+        let sign_str = SshString::new(sign_blob);
+
+        let test = SshString::new("hello");
+
+        let msg = Message::new(MessageNumber::SSH_MSG_KEX_ECDH_REPLY)
+            // .extend(q_s.clone())
+            // .extend(q_s.clone())
+            // .extend(q_s.clone());
+            // .extend(test.clone())
+            // .extend(test.clone())
+            // .extend(test.clone());
+            // .extend(k_s.clone())
+            // .extend(k_s.clone())
+            .extend(k_s)
+            .extend(q_s)
+            .extend(sign_str);
+
+        let test = SshString::new("hello");
+        let mut test_buf = BytesMut::new();
+        test.encode(&mut test_buf);
+        // println!("{:?}", test_buf);
+        // dump::
+
+        dump::<16>(&test_buf);
+
+        dump::<16>(&msg.buffer);
+
+        // msg.buffer
+
+        let mut writer = FramedWrite::new(write_half, BinaryPacketEncoder::default());
+        writer.send(msg.buffer).await?;
+
+        // let
+
+        Ok(())
+    }
+
+    async fn alghorithm_negotiation(
+        &mut self,
+    ) -> io::Result<(AlgorithmNegotiation, BytesMut, BytesMut)> {
         let (mut read_half, write_half) = self.stream.split();
         let mut binary_packet_reader = FramedRead::new(read_half, BinaryPacketDecoder::default());
 
@@ -114,97 +226,23 @@ impl SshServer {
             .await
             .ok_or(Error::other("failed to read binary packet"))??;
 
+        let saved2 = binary_packet.payload.inner.clone();
+
         let algo_nego = AlgorithmNegotiation::parse(&mut binary_packet.payload)?;
 
+        // Selfに保存するなり何なり
         let mut server_algo_nego = algo_nego.clone();
         server_algo_nego.server_host_key_algorithms =
-            NameList::new(vec!["ssh-ed25519".to_string()]);
+            NameList::new(vec!["ecdsa-sha2-nistp256".to_string()]);
 
-        println!("{:?}", server_algo_nego.server_host_key_algorithms);
+        // println!("{:?}", server_algo_nego.server_host_key_algorithms);
 
         let server_algo_nego_encoded = server_algo_nego.encode();
+        let saved = server_algo_nego_encoded.clone();
 
         writer.send(server_algo_nego_encoded.clone()).await?;
 
-        let mut ecdh = binary_packet_reader
-            .next()
-            .await
-            .ok_or(Error::other("failed to read binary packet"))??;
-
-        let ecdh = EcdhKex::parse(&mut ecdh.payload)?;
-
-        // SigningKey経由でしかKeyPairを生成できないのは不用意にprivateを露出させないみたいな意図があるんでしょうかね
-        // 何にしてもdocs読んで型変換探すのがだるいのでやめてほしい所存
-        let server_signing_key = ed25519_dalek::SigningKey::generate(&mut OsRng);
-
-        // サーバー側では秘密鍵を保持しておいて二回目以降で使い回し、クライアントは初回に送信された公開鍵を保存しておいて二回目以降で照合してmitmを防ぐ的な
-        // WARNING: REMOTE HOST IDENTIFICATION HAS CHANGED! の話
-        let server_keypair = KeypairBytes::from_bytes(&server_signing_key.to_keypair_bytes());
-        let server_secret = EphemeralSecret::random(&mut OsRng);
-
-        let server_shared = server_secret.diffie_hellman(&ecdh.client_public_key);
-        let server_tmp_public = server_secret.public_key();
-
-        let V_C = self.client_identification.clone().unwrap();
-        let V_C = V_C.encode();
-        let V_C = V_C.trim_end_matches("\r\n");
-
-        let V_C = BytesMut::from(V_C);
-
-        let V_S = BytesMut::from("SSH-2.0-OpenSSH_10.0");
-        let I_C = algo_nego.encode();
-
-        let I_S = server_algo_nego_encoded;
-        let mut K_S_NAME = BytesMut::from("ssh-ed25519");
-        let mut K_S_KEY = BytesMut::from(&server_keypair.public_key.unwrap().to_bytes()[..]);
-        let mut k_s = BytesMut::new();
-
-        k_s.put(SpString::encode(&K_S_NAME));
-        k_s.put(SpString::encode(&K_S_KEY));
-
-        // ecdh_reply.put(SpString::encode(&k_s));
-        // println!("{:?}", K_S);
-
-        let Q_C = BytesMut::from(&ecdh.client_public_key.to_sec1_bytes()[..]);
-
-        let Q_S = BytesMut::from(&server_tmp_public.to_sec1_bytes()[..]);
-
-        // let K = BytesMut::from(server_shared.raw_secret_bytes().as_slice());
-        let mut K = BytesMut::new();
-        encode_mpint(server_shared.raw_secret_bytes(), &mut K).unwrap();
-
-        let mut exchange_concatation = BytesMut::new();
-        // V_C.encode
-
-        exchange_concatation.put(SpString::encode(&V_C));
-        exchange_concatation.put(SpString::encode(&V_S));
-        exchange_concatation.put(SpString::encode(&I_C));
-        exchange_concatation.put(SpString::encode(&I_S));
-        exchange_concatation.put(SpString::encode(&k_s.clone()));
-        // exchange_concatation.put(SpString::encode(&K_S_KEY.clone()));
-        exchange_concatation.put(SpString::encode(&Q_C));
-        exchange_concatation.put(SpString::encode(&Q_S.clone()));
-        exchange_concatation.put(&mut K.clone());
-
-        let H = Sha256::digest(exchange_concatation);
-
-        let mut ecdh_reply = BytesMut::new();
-        ecdh_reply.put_u8(MessageNumber::SSH_MSG_KEX_ECDH_REPLY as u8);
-        ecdh_reply.put(SpString::encode(&k_s));
-        ecdh_reply.put(SpString::encode(&Q_S));
-
-        let sign = server_signing_key.sign(&H);
-        let mut sig_blob = BytesMut::new();
-        sig_blob.put(SpString::encode(&BytesMut::from("ssh-ed25519")));
-        sig_blob.put(SpString::encode(&BytesMut::from(&sign.to_bytes()[..])));
-
-        ecdh_reply.put(SpString::encode(&sig_blob));
-        // ecdh_reply.put(SpString::encode(&BytesMut::from(&sign.to_bytes()[..])));
-
-        dump::<16>(&ecdh_reply);
-        writer.send(ecdh_reply).await?;
-
-        Ok(())
+        Ok((algo_nego, saved2, saved))
     }
 
     async fn excahnge_identification(&mut self) -> io::Result<Identification> {
