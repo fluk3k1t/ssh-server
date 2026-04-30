@@ -6,7 +6,7 @@ use std::{
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use p256::ecdsa::{Signature, VerifyingKey};
 
-use crate::Payload;
+use crate::{AlgorithmNegotiation, Payload};
 
 pub trait Parse: Sized {
     // BytesMutのclone前提は筋が悪いが、&mut BytesMutにしてparseで内部カーソルが進んでデータが変わるのは意識から外れがちなので一旦
@@ -28,15 +28,26 @@ pub enum MessageNumber {
 
 #[derive(Debug, Clone)]
 pub enum Msg {
-    ProtoVerEx(BytesMut),
+    KexInit(AlgorithmNegotiation),
+    DhInit(BytesMut),
 }
 
 impl Msg {
-    // pub fn parse(mut src: BytesMut) -> io::Result<Self> {
-    //     let message_number = src.get_u8();
+    pub fn parse(mut src: BytesMut) -> io::Result<Self> {
+        let message_number = src.get_u8();
 
-    //     match message_number {}
-    // }
+        if message_number == MessageNumber::SSH_MSG_KEXINIT as u8 {
+            let re = src.clone();
+            let mut msg = AlgorithmNegotiation::parse(src)?;
+            msg.payload = re;
+
+            Ok(Msg::KexInit(msg))
+        } else if message_number == MessageNumber::SSH_MSG_KEX_ECDH_INIT as u8 {
+            Ok(Msg::DhInit(src))
+        } else {
+            Err(Error::other(""))
+        }
+    }
 }
 
 #[derive(Debug, Clone)]

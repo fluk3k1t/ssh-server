@@ -19,20 +19,12 @@ pub struct AlgorithmNegotiation {
     pub languages_client_to_server: NameList,
     pub languages_server_to_client: NameList,
     pub first_kex_packet_follows: bool,
+    pub payload: BytesMut,
 }
 
 impl Parse for AlgorithmNegotiation {
     fn parse(mut payload: BytesMut) -> io::Result<Self> {
-        let msg = payload[0];
-
-        if msg != MessageNumber::SSH_MSG_KEXINIT as u8 {
-            return Err(io::Error::other(format!(
-                "expected {:?} but ",
-                MessageNumber::SSH_MSG_KEXINIT
-            )));
-        }
-
-        let _msg = payload.get_u8();
+        let payload_cloned = payload.clone();
 
         let cookie: [u8; 16] = *payload
             .split_to(16)
@@ -66,6 +58,7 @@ impl Parse for AlgorithmNegotiation {
             languages_client_to_server,
             languages_server_to_client,
             first_kex_packet_follows,
+            payload: payload_cloned,
         })
     }
 }

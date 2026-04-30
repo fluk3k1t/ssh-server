@@ -20,6 +20,7 @@ use sha2::{Digest, Sha256};
 use crate::{
     AlgorithmNegotiation, BinaryPacketCodec, ByteStream, Encode, EncodeToBytesMut, Message,
     MessageNumber, NameList, Parse, Payload, SshMpInt, SshPublicKey, SshSignature, SshString,
+    algo_nego,
 };
 use crate::{EcdhKex, Msg};
 use std::io::{self, Error, Sink};
@@ -63,6 +64,13 @@ impl Identification {
 #[derive(Debug, Clone)]
 pub enum SshServerState {
     WaitForProtoEx,
+    AfterProtoEx(State),
+}
+
+#[derive(Debug, Clone)]
+pub enum State {
+    WaitForKexInit,
+    WaitForDhInit,
 }
 
 pub struct SshServer {
@@ -102,24 +110,38 @@ impl SshServer {
     pub async fn run(mut self) -> io::Result<()> {
         let j: tokio::task::JoinHandle<io::Result<()>> = tokio::spawn(async move {
             loop {
-                let mut binary_codec = {
-                    match self.state {
-                        SshServerState::WaitForProtoEx => {
-                            Framed::new(&mut self.stream, BinaryPacketCodec::Header)
-                        }
-                    }
-                };
-
-                let mut binary_packet = binary_codec
-                    .next()
-                    .await
-                    .ok_or(Error::other("failed to read binary packet"))??;
-
                 match self.state {
                     SshServerState::WaitForProtoEx => {
-                        let _ = self
-                            .excahnge_identification(&mut binary_packet.payload.inner)
-                            .await?;
+                        let mut buf = BytesMut::new();
+
+                        loop {
+                            self.stream.read_buf(&mut buf).await?;
+                            if buf.windows(2).any(|w| w == b"\r\n") {
+                                break;
+                            }
+                        }
+
+                        self.excahnge_identification(&mut buf).await?;
+                    }
+                    SshServerState::AfterProtoEx(ref state) => {
+                        let mut binary_codec = {
+                            match state {
+                                _ => Framed::new(&mut self.stream, BinaryPacketCodec::Header),
+                            }
+                        };
+
+                        let binary_packet = binary_codec
+                            .next()
+                            .await
+                            .ok_or(Error::other("failed to read binary packet"))??;
+
+                        match Msg::parse(binary_packet.payload.inner)? {
+                            Msg::KexInit(payload) => {
+                                self.alghorithm_negotiation(&payload).await?;
+                            }
+                            Msg::DhInit(mut payload) => self.key_exchange(&mut payload).await?,
+                            _ => todo!(),
+                        };
                     }
                 }
             }
@@ -137,21 +159,21 @@ impl SshServer {
         Ok(())
     }
 
-    async fn key_exchange(&mut self) -> io::Result<()> {
-        let client_algorithm = self.alghorithm_negotiation().await?;
+    async fn key_exchange(&mut self, ecdh: &mut BytesMut) -> io::Result<()> {
+        // let client_algorithm = self.alghorithm_negotiation().await?;
 
-        println!("{:#?}", client_algorithm);
+        // println!("{:#?}", client_algorithm);
 
         // let (mut read_half, write_half) = self.stream.split();
         // let mut binary_packet_reader = FramedRead::new(read_half, BinaryPacketDecoder::default());
         let mut binary_packet_codec = Framed::new(&mut self.stream, BinaryPacketCodec::Header);
 
-        let mut ecdh = binary_packet_codec
-            .next()
-            .await
-            .ok_or(Error::other("failed to read binary packet"))??;
+        // let mut ecdh = binary_packet_codec
+        //     .next()
+        //     .await
+        //     .ok_or(Error::other("failed to read binary packet"))??;
 
-        let ecdh = EcdhKex::parse(ecdh.payload.inner.clone())?;
+        let ecdh = EcdhKex::parse(ecdh.clone())?;
         let server_signing_key = ecdsa::SigningKey::random(&mut OsRng);
         let server_secret = EphemeralSecret::random(&mut OsRng);
         let server_shared = server_secret.diffie_hellman(&ecdh.client_public_key);
@@ -236,18 +258,14 @@ impl SshServer {
         Ok(())
     }
 
-    async fn alghorithm_negotiation(&mut self) -> io::Result<AlgorithmNegotiation> {
+    async fn alghorithm_negotiation(
+        &mut self,
+        algo_nego: &AlgorithmNegotiation,
+    ) -> io::Result<AlgorithmNegotiation> {
         let mut binary_packet_codec = Framed::new(&mut self.stream, BinaryPacketCodec::default());
+        self.client_kex_init_payload = Some(algo_nego.payload.clone().freeze());
 
-        let mut binary_packet = binary_packet_codec
-            .next()
-            .await
-            .ok_or(Error::other("failed to read binary packet"))??;
-
-        // parseでinner: BytesMutの内部カーソルが進んでしまうので、parseする前にコピー
-        self.client_kex_init_payload = Some(binary_packet.payload.inner.clone().freeze());
-
-        let algo_nego = AlgorithmNegotiation::parse(binary_packet.payload.inner.clone())?;
+        // let algo_nego = AlgorithmNegotiation::parse(algo_nego.clone())?;
 
         // Selfに保存するなり何なり
         let mut server_algo_nego = algo_nego.clone();
@@ -271,7 +289,9 @@ impl SshServer {
             .send(server_algo_nego_encoded.clone())
             .await?;
 
-        Ok(algo_nego)
+        self.state = SshServerState::AfterProtoEx(State::WaitForDhInit);
+
+        Ok(algo_nego.clone())
     }
 
     async fn excahnge_identification(&mut self, buf: &mut BytesMut) -> io::Result<Identification> {
@@ -299,7 +319,10 @@ impl SshServer {
             softwareversion.clone(),
         ));
 
+        self.state = SshServerState::AfterProtoEx(State::WaitForKexInit);
+
         Ok(Identification::new(protoversion, softwareversion))
+        // Ok(SshServerState::AfterProtoEx(State::WaitForKexInit))
     }
 }
 
