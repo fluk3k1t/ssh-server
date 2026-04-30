@@ -1,11 +1,16 @@
-use std::{collections::VecDeque, io};
+use std::{
+    collections::VecDeque,
+    io::{self, Error},
+};
 
 use bytes::{Buf, BufMut, Bytes, BytesMut};
+use p256::ecdsa::{Signature, VerifyingKey};
 
 use crate::Payload;
 
 pub trait Parse: Sized {
-    fn parse(src: &mut Payload) -> io::Result<Self>;
+    // BytesMutのclone前提は筋が悪いが、&mut BytesMutにしてparseで内部カーソルが進んでデータが変わるのは意識から外れがちなので一旦
+    fn parse(src: BytesMut) -> io::Result<Self>;
 }
 
 pub trait Encode: Sized {
@@ -15,8 +20,23 @@ pub trait Encode: Sized {
 #[derive(Debug, Clone)]
 pub enum MessageNumber {
     SSH_MSG_KEXINIT = 20,
+    SSH_MSG_NEWKEYS = 21,
+
     SSH_MSG_KEX_ECDH_INIT = 30,
     SSH_MSG_KEX_ECDH_REPLY = 31,
+}
+
+#[derive(Debug, Clone)]
+pub enum Msg {
+    ProtoVerEx(BytesMut),
+}
+
+impl Msg {
+    // pub fn parse(mut src: BytesMut) -> io::Result<Self> {
+    //     let message_number = src.get_u8();
+
+    //     match message_number {}
+    // }
 }
 
 #[derive(Debug, Clone)]
@@ -52,38 +72,6 @@ impl Encode for NameList {
     }
 }
 
-pub type SpString = BytesMut;
-impl Parse for SpString {
-    fn parse(src: &mut Payload) -> io::Result<Self> {
-        let length = src.inner.get_u32();
-        let str = src.inner.split_to(length as usize);
-
-        Ok(str)
-    }
-}
-
-impl Encode for SpString {
-    fn encode(&self) -> BytesMut {
-        let length = self.len();
-
-        let mut bytes = BytesMut::new();
-        // bytes.put_u32(length as u32);
-        bytes.put_u32(length as u32);
-
-        bytes.put(&self.to_vec()[..]);
-
-        bytes
-    }
-}
-
-impl EncodeToBytesMut for SpString {
-    fn encode(&self, dst: &mut BytesMut) {
-        let length = self.len();
-        dst.put_u32(length as u32);
-        dst.put(&self.to_vec()[..]);
-    }
-}
-
 pub fn parse_name_list(src: &mut BytesMut) -> io::Result<NameList> {
     let length = src.get_u32();
     let name_list = String::from_utf8_lossy(&src.split_to(length as usize))
@@ -115,8 +103,8 @@ impl Message {
         }
     }
 
-    pub fn ssh_string(self, str: String) -> Message {
-        self.extend(SshString::new(str))
+    pub fn ssh_string(self, str: impl Into<Bytes>) -> Message {
+        self.extend(SshString::new(str.into()))
     }
 
     pub fn extend(mut self, item: impl EncodeToBytesMut) -> Message {
@@ -137,16 +125,21 @@ impl ByteStream {
         }
     }
 
-    pub fn ssh_string(self, str: impl Into<BytesMut>) -> ByteStream {
+    pub fn ssh_string(self, str: impl Into<Bytes>) -> ByteStream {
         self.extend(SshString::new(str.into()))
     }
 
-    pub fn ssh_mpint(self, src: impl Into<BytesMut>) -> ByteStream {
+    pub fn ssh_mpint(self, src: impl Into<Bytes>) -> ByteStream {
         self.extend(SshMpInt::new(src.into()))
     }
 
     pub fn extend(mut self, item: impl EncodeToBytesMut) -> ByteStream {
         item.encode(&mut self.buffer);
+        self
+    }
+
+    pub fn put(mut self, item: impl Buf) -> ByteStream {
+        self.buffer.put(item);
         self
     }
 }
@@ -159,6 +152,23 @@ pub struct SshString {
 impl SshString {
     pub fn new(src: impl Into<Bytes>) -> SshString {
         SshString { src: src.into() }
+    }
+
+    pub fn parse(src: &mut BytesMut) -> Self {
+        let length = src.get_u32();
+        let str = src.split_to(length as usize);
+
+        SshString {
+            src: str.clone().into(),
+        }
+    }
+
+    pub fn as_bytes(&self) -> Bytes {
+        self.src.clone()
+    }
+
+    pub fn as_str(&self) -> String {
+        String::from_utf8_lossy(&self.src).to_string()
     }
 }
 
@@ -211,15 +221,15 @@ impl EncodeToBytesMut for SshMpInt {
 
 #[derive(Debug, Clone)]
 pub struct SshPublicKey {
-    format_identifier: String,
-    blob: BytesMut,
+    identifier: String,
+    key: VerifyingKey,
 }
 
 impl SshPublicKey {
-    pub fn new(format_identifier: impl Into<String>, blob: BytesMut) -> Self {
+    pub fn new(identifier: impl Into<String>, key: VerifyingKey) -> Self {
         SshPublicKey {
-            format_identifier: format_identifier.into(),
-            blob: blob.into(),
+            identifier: identifier.into(),
+            key,
         }
     }
 
@@ -233,11 +243,41 @@ impl SshPublicKey {
 
 impl EncodeToBytesMut for SshPublicKey {
     fn encode(&self, dst: &mut BytesMut) {
-        let format_identifier = self.format_identifier.clone();
-        let format_identifier = SshString::new(format_identifier);
-        format_identifier.encode(dst);
+        let mut blob = BytesMut::new();
 
-        SshString::new(self.blob.to_vec()).encode(dst);
-        // dst.extend(&self.blob);
+        SshString::new(format!("ecdsa-sha2-{}", self.identifier.clone())).encode(&mut blob);
+        SshString::new(self.identifier.clone()).encode(&mut blob);
+        SshString::new(self.key.to_encoded_point(false).as_bytes().to_vec()).encode(&mut blob);
+        SshString::new(blob).encode(dst);
+    }
+}
+
+#[derive(Debug)]
+pub struct SshSignature {
+    sig: Signature,
+    identifier: String,
+}
+
+impl SshSignature {
+    pub fn new(sig: Signature, identifier: impl Into<String>) -> Self {
+        SshSignature {
+            sig,
+            identifier: identifier.into(),
+        }
+    }
+}
+
+impl EncodeToBytesMut for SshSignature {
+    fn encode(&self, dst: &mut BytesMut) {
+        let mut str = BytesMut::new();
+
+        SshString::new(format!("ecdsa-sha2-{}", self.identifier)).encode(&mut str);
+
+        let mut blob = BytesMut::new();
+        SshMpInt::new(self.sig.r().to_bytes().to_vec()).encode(&mut blob);
+        SshMpInt::new(self.sig.s().to_bytes().to_vec()).encode(&mut blob);
+        SshString::new(blob).encode(&mut str);
+
+        SshString::new(str).encode(dst);
     }
 }

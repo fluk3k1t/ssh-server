@@ -5,12 +5,18 @@ use tokio_util::codec::{Decoder, Encoder};
 
 use bytes::BytesMut;
 
-use crate::Encode;
+use crate::{Encode, MessageNumber};
 
 #[derive(Debug)]
 pub struct BinaryPacket {
     pub payload: Payload,
 }
+
+// impl BinaryPacket {
+//     pub fn expect(&mut self, message_number: MessageNumber) -> io::Result<()> {
+
+//     }
+// }
 
 #[derive(Debug)]
 pub struct Payload {
@@ -26,25 +32,25 @@ impl Payload {
 }
 
 #[derive(Debug)]
-pub enum BinaryPacketDecoder {
+pub enum BinaryPacketCodec {
     Header,
     Payload(usize, usize, Vec<u8>),
     Padding(usize, Vec<u8>),
 }
 
-impl Default for BinaryPacketDecoder {
+impl Default for BinaryPacketCodec {
     fn default() -> Self {
-        BinaryPacketDecoder::Header
+        BinaryPacketCodec::Header
     }
 }
 
-impl Decoder for BinaryPacketDecoder {
+impl Decoder for BinaryPacketCodec {
     type Item = BinaryPacket;
     type Error = io::Error;
 
     fn decode(&mut self, src: &mut bytes::BytesMut) -> Result<Option<Self::Item>, Self::Error> {
         match self {
-            BinaryPacketDecoder::Header => {
+            BinaryPacketCodec::Header => {
                 if src.remaining() < size_of::<u32>() + size_of::<u8>() {
                     return Ok(None);
                 }
@@ -55,7 +61,7 @@ impl Decoder for BinaryPacketDecoder {
                 println!("pakcet length {}", packet_length);
                 println!("padding_length {}", padding_length);
 
-                *self = BinaryPacketDecoder::Payload(
+                *self = BinaryPacketCodec::Payload(
                     packet_length - padding_length - 1,
                     padding_length,
                     Vec::new(),
@@ -63,7 +69,7 @@ impl Decoder for BinaryPacketDecoder {
 
                 self.decode(src)
             }
-            BinaryPacketDecoder::Payload(payload_remaining, padding_remaining, payload) => {
+            BinaryPacketCodec::Payload(payload_remaining, padding_remaining, payload) => {
                 let reading_length = min(*payload_remaining, src.remaining());
                 *payload_remaining = payload_remaining.saturating_sub(reading_length);
 
@@ -73,13 +79,13 @@ impl Decoder for BinaryPacketDecoder {
 
                 match *payload_remaining {
                     0 => {
-                        *self = BinaryPacketDecoder::Padding(*padding_remaining, payload.clone());
+                        *self = BinaryPacketCodec::Padding(*padding_remaining, payload.clone());
                         self.decode(src)
                     }
                     _ => Ok(None),
                 }
             }
-            BinaryPacketDecoder::Padding(padding_remaining, payload) => {
+            BinaryPacketCodec::Padding(padding_remaining, payload) => {
                 let reading_length = min(*padding_remaining, src.remaining());
                 *padding_remaining = padding_remaining.saturating_sub(reading_length);
 
@@ -91,7 +97,7 @@ impl Decoder for BinaryPacketDecoder {
                     0 => {
                         let payload = payload.clone();
 
-                        *self = BinaryPacketDecoder::Header;
+                        *self = BinaryPacketCodec::Header;
                         src.clear();
 
                         Ok(Some(BinaryPacket {
@@ -105,15 +111,7 @@ impl Decoder for BinaryPacketDecoder {
     }
 }
 
-pub struct BinaryPacketEncoder;
-
-impl Default for BinaryPacketEncoder {
-    fn default() -> Self {
-        BinaryPacketEncoder
-    }
-}
-
-impl Encoder<BytesMut> for BinaryPacketEncoder {
+impl Encoder<BytesMut> for BinaryPacketCodec {
     type Error = io::Error;
 
     fn encode(&mut self, item: BytesMut, dst: &mut BytesMut) -> Result<(), Self::Error> {
