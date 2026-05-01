@@ -3,9 +3,7 @@ use std::io;
 use bytes::{Buf, BufMut, BytesMut};
 use tokio_util::codec::Encoder;
 
-use crate::{
-    BinaryPacketEncoder, Encode, MessageNumber, NameList, Parse, Payload, parse_name_list,
-};
+use crate::{Encode, MessageNumber, NameList, Parse, Payload, parse_name_list};
 
 #[derive(Debug, Clone)]
 pub struct AlgorithmNegotiation {
@@ -24,9 +22,7 @@ pub struct AlgorithmNegotiation {
 }
 
 impl Parse for AlgorithmNegotiation {
-    fn parse(src: &mut Payload) -> io::Result<Self> {
-        let payload = &mut src.inner;
-
+    fn parse(mut payload: BytesMut) -> io::Result<Self> {
         let msg = payload[0];
 
         if msg != MessageNumber::SSH_MSG_KEXINIT as u8 {
@@ -43,16 +39,16 @@ impl Parse for AlgorithmNegotiation {
             .first_chunk::<16>()
             .expect("unreachable");
 
-        let kex_algorithms = parse_name_list(payload)?;
-        let server_host_key_algorithms = parse_name_list(payload)?;
-        let encryption_algorithms_client_to_server = parse_name_list(payload)?;
-        let encryption_algorithms_server_to_client = parse_name_list(payload)?;
-        let mac_algorithms_client_to_server = parse_name_list(payload)?;
-        let mac_algorithms_server_to_client = parse_name_list(payload)?;
-        let compression_algorithms_client_to_server = parse_name_list(payload)?;
-        let compression_algorithms_server_to_client = parse_name_list(payload)?;
-        let languages_client_to_server = parse_name_list(payload)?;
-        let languages_server_to_client = parse_name_list(payload)?;
+        let kex_algorithms = parse_name_list(&mut payload)?;
+        let server_host_key_algorithms = parse_name_list(&mut payload)?;
+        let encryption_algorithms_client_to_server = parse_name_list(&mut payload)?;
+        let encryption_algorithms_server_to_client = parse_name_list(&mut payload)?;
+        let mac_algorithms_client_to_server = parse_name_list(&mut payload)?;
+        let mac_algorithms_server_to_client = parse_name_list(&mut payload)?;
+        let compression_algorithms_client_to_server = parse_name_list(&mut payload)?;
+        let compression_algorithms_server_to_client = parse_name_list(&mut payload)?;
+        let languages_client_to_server = parse_name_list(&mut payload)?;
+        let languages_server_to_client = parse_name_list(&mut payload)?;
 
         let first_kex_packet_follows = payload.get_u8() != 0;
         let _reserved = payload.get_u32();
