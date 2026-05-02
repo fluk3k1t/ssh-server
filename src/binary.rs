@@ -130,13 +130,14 @@ impl Encoder<BytesMut> for BinaryPacketCodec {
     }
 }
 
-pub type Cipher = StreamCipherCoreWrapper<ctr::CtrCore<Aes128, ctr::flavors::Ctr64LE>>;
+pub type Cipher = StreamCipherCoreWrapper<ctr::CtrCore<Aes128, ctr::flavors::Ctr128BE>>;
 
 #[derive(Debug, Clone)]
 pub enum EncryptedBinaryPacketCodecState {
     Header,
     Payload(usize, usize, Vec<u8>),
     Padding(usize, Vec<u8>),
+    Mac(Vec<u8>),
 }
 pub struct EncryptedBinaryPacketCodec {
     cipher: Cipher,
@@ -161,39 +162,37 @@ impl Decoder for EncryptedBinaryPacketCodec {
     type Error = io::Error;
 
     fn decode(&mut self, src: &mut bytes::BytesMut) -> Result<Option<Self::Item>, Self::Error> {
-        println!("decode");
-
         match &mut self.state {
+            EncryptedBinaryPacketCodecState::Mac(payload) => {
+                if src.remaining() < 32 {
+                    return Ok(None);
+                }
+
+                let _mac = src.split_to(32);
+
+                println!("{:02x?}", &_mac[..32]);
+
+                src.clear();
+
+                let payload = payload.clone();
+                self.state = EncryptedBinaryPacketCodecState::Header;
+
+                Ok(Some(BinaryPacket {
+                    payload: Payload::new(BytesMut::from_iter(payload)),
+                }))
+            }
             EncryptedBinaryPacketCodecState::Header => {
                 if src.remaining() < size_of::<u32>() + size_of::<u8>() {
                     return Ok(None);
                 }
 
-                // let mut decrypted = src.clone();
-
+                // packet_length, padding_lengthフィールドのみを複合
+                // 復号によりcipherの内部ivが進む?
                 self.cipher
-                    .apply_keystream(&mut src[..(size_of::<u32>() + size_of::<u8>()) as usize]);
+                    .apply_keystream(&mut src[..(size_of::<u32>() + size_of::<u8>())]);
 
                 let packet_length = src.get_u32() as usize;
                 let padding_length = src.get_u8() as usize;
-
-                // self.packet_length = Some(packet_length as u32);
-                // self.padding_length = Some(padding_length as u8);
-
-                // src.advance(size_of::<u32>() + size_of::<u8>());
-
-                // println!("{:?}", &src[..5]);
-                // let packet_length_raw = src.get_u32();
-                // let padding_length_raw = src.get_u8();
-
-                // println!(
-                //     "{:?}",
-                //     vec![
-                //         packet_length_raw.to_be_bytes().to_vec(),
-                //         vec![padding_length_raw],
-                //     ]
-                //     .concat()
-                // );
 
                 self.state = EncryptedBinaryPacketCodecState::Payload(
                     packet_length - padding_length - 1,
@@ -208,12 +207,6 @@ impl Decoder for EncryptedBinaryPacketCodec {
                 padding_remaining,
                 payload,
             ) => {
-                // let mut p = BytesMut::from_iter(payload.clone());
-                // self.cipher.apply_keystream(&mut p);
-                // // println!("ok {:?}", &p[..5]);
-
-                // todo!();
-
                 let reading_length = min(*payload_remaining, src.remaining());
                 *payload_remaining = payload_remaining.saturating_sub(reading_length);
 
@@ -241,21 +234,44 @@ impl Decoder for EncryptedBinaryPacketCodec {
                     0 => {
                         let mut payload = payload.clone();
 
-                        self.state = EncryptedBinaryPacketCodecState::Header;
-                        src.clear();
-
                         self.cipher.apply_keystream(&mut payload);
+                        // for chunk in payload.chunks_mut(3) {
+                        // self.cipher.apply_keystream(chunk);
+                        // }
 
-                        println!("{:?}", payload);
-                        todo!();
+                        self.state = EncryptedBinaryPacketCodecState::Mac(payload.clone());
 
-                        Ok(Some(BinaryPacket {
-                            payload: Payload::new(BytesMut::from_iter(payload)),
-                        }))
+                        self.decode(src)
+                        // Ok(Some(BinaryPacket {
+                        //     payload: Payload::new(BytesMut::from_iter(payload)),
+                        // }))
                     }
                     _ => Ok(None),
                 }
             }
         }
+    }
+}
+
+impl Encoder<BytesMut> for EncryptedBinaryPacketCodec {
+    type Error = io::Error;
+
+    fn encode(&mut self, item: BytesMut, dst: &mut BytesMut) -> Result<(), Self::Error> {
+        let mut padding_length = 4;
+
+        while (4 + 1 + item.len() + padding_length) % 8 != 0 {
+            padding_length += 1;
+        }
+
+        let packet_length = 1 + item.len() + padding_length;
+
+        dst.put_u32(packet_length as u32);
+        dst.put_u8(padding_length as u8);
+        dst.put(item);
+        dst.put_bytes(0, padding_length);
+
+        self.cipher.apply_keystream(dst);
+
+        Ok(())
     }
 }

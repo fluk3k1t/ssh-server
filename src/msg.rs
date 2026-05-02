@@ -20,6 +20,7 @@ pub trait Encode: Sized {
 #[derive(Debug, Clone)]
 pub enum MessageNumber {
     SSH_MSG_SERVICE_REQUEST = 5,
+    SSH_MSG_SERVICE_ACCEPT = 6,
 
     SSH_MSG_KEXINIT = 20,
     SSH_MSG_NEWKEYS = 21,

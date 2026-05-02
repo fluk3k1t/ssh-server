@@ -16,9 +16,9 @@ use sha2::{Digest, Sha256};
 // use ssh_key::PublicKey;
 // use sec1::EncodedPoint;
 use ssh_server::{
-    AlgorithmNegotiation, BinaryPacketCodec, ByteStream, Encode, EncodeToBytesMut,
-    EncryptedBinaryPacketCodec, Message, MessageNumber, NameList, Parse, Payload, SshMpInt,
-    SshPublicKey, SshString,
+    AlgorithmNegotiation, BinaryPacketCodec, ByteStream, Cipher, Encode, EncodeToBytesMut,
+    EncryptedBinaryPacketCodec, Message, MessageNumber, NameList, Parse, Payload, Service,
+    SshMpInt, SshPublicKey, SshString,
 };
 use ssh_server::{EcdhKex, SshSignature};
 use std::io::{self, Error, Sink};
@@ -27,7 +27,7 @@ use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::{TcpListener, TcpStream},
 };
-use tokio_util::codec::{Framed, FramedRead};
+use tokio_util::codec::{Encoder, Framed, FramedRead};
 //
 #[tokio::main]
 async fn main() -> io::Result<()> {
@@ -40,10 +40,10 @@ async fn main() -> io::Result<()> {
     }
 }
 
-type Aes128Ctr64LE = ctr::Ctr64LE<aes::Aes128>;
+type Aes128Ctr128BE = ctr::Ctr128BE<aes::Aes128>;
 pub struct SshServer {
     // binary_packet_reader: Framed<TcpStream, BinaryPacketDecoder>,
-    stream: TcpStream,
+    stream: Option<TcpStream>,
     client_identification: Option<Identification>,
     client_kex_init_payload: Option<Bytes>,
     server_kex_init_payload: Option<Bytes>,
@@ -54,6 +54,9 @@ pub struct SshServer {
     encryption_algorithms_server_to_client: String,
     mac_algorithms_client_to_server: String,
     mac_algorithms_server_to_client: String,
+    // cipher: Option<Cipher>,
+    enc_codec: Option<Framed<TcpStream, EncryptedBinaryPacketCodec>>,
+    shared_key: Option<Vec<u8>>,
 }
 
 #[derive(Debug, Clone)]
@@ -84,7 +87,7 @@ type Aes128Ctr = Ctr128BE<Aes128>;
 impl SshServer {
     pub fn new(stream: TcpStream) -> Self {
         Self {
-            stream,
+            stream: Some(stream),
             client_identification: None,
             client_kex_init_payload: None,
             server_kex_init_payload: None,
@@ -94,6 +97,9 @@ impl SshServer {
             encryption_algorithms_server_to_client: "aes128-ctr".to_owned(),
             mac_algorithms_client_to_server: "hmac-sha2-256".to_owned(),
             mac_algorithms_server_to_client: "hmac-sha2-256".to_owned(),
+            // cipher: None,
+            shared_key: None,
+            enc_codec: None,
         }
     }
 
@@ -101,19 +107,61 @@ impl SshServer {
         let client_identification = self.excahnge_identification().await?;
         self.client_identification = Some(client_identification);
 
-        self.key_exchange().await?;
+        let cipher = self.key_exchange().await?;
+
+        let mut stream = self.stream.take().unwrap();
+        let mut encrypted_binary_codec: Framed<&mut TcpStream, EncryptedBinaryPacketCodec> =
+            Framed::new(&mut stream, EncryptedBinaryPacketCodec::new(cipher));
+
+        self.service_request(&mut encrypted_binary_codec).await?;
 
         Ok(())
     }
 
-    async fn key_exchange(&mut self) -> io::Result<()> {
+    async fn service_request(
+        &mut self,
+        codec: &mut Framed<&mut TcpStream, EncryptedBinaryPacketCodec>,
+    ) -> io::Result<()> {
+        let service_req_msg = codec.next().await.unwrap()?;
+        let service_req_msg = Service::parse(service_req_msg.payload.inner.clone())?;
+
+        if service_req_msg.service_name.as_str() != "ssh-userauth" {
+            todo!()
+        }
+
+        let mut service = BytesMut::new();
+        service.put_u8(MessageNumber::SSH_MSG_SERVICE_ACCEPT as u8);
+        SshString::new("ssh-userauth").encode(&mut service);
+
+        let mut packet = BytesMut::new();
+        // codec.codec_mut().encode(service.clone(), &mut packet)?;
+        // codec.
+
+        let sequence_number = 6 as u32;
+
+        let mut mac = BytesMut::new();
+        mac.put_u32(sequence_number);
+        mac.put(packet.clone());
+
+        let mac = hmac_sha256::HMAC::mac(mac, self.shared_key.as_mut().unwrap());
+
+        let mut ff = BytesMut::new();
+        codec.codec_mut().encode(service.clone(), &mut ff)?;
+        ff.put(&mac[..]);
+
+        dump::<8>(&ff);
+
+        // codec.send(service).await?;
+        codec.get_mut().write_all(&ff).await?;
+
+        Ok(())
+    }
+
+    async fn key_exchange(&mut self) -> io::Result<Cipher> {
         let client_algorithm = self.alghorithm_negotiation().await?;
 
-        println!("{:#?}", client_algorithm);
-
-        // let (mut read_half, write_half) = self.stream.split();
-        // let mut binary_packet_reader = FramedRead::new(read_half, BinaryPacketDecoder::default());
-        let mut binary_packet_codec = Framed::new(&mut self.stream, BinaryPacketCodec::Header);
+        let mut stream = self.stream.as_mut().unwrap();
+        let mut binary_packet_codec = Framed::new(&mut stream, BinaryPacketCodec::Header);
 
         let mut ecdh = binary_packet_codec
             .next()
@@ -126,6 +174,8 @@ impl SshServer {
         let server_shared = server_secret.diffie_hellman(&ecdh.client_public_key);
         let server_tmp_public = server_secret.public_key();
         let verifying_key = server_signing_key.verifying_key();
+
+        self.shared_key = Some(server_shared.raw_secret_bytes().to_vec());
 
         let k_s = SshPublicKey::new("nistp256", *verifying_key);
         let v_c = self
@@ -187,32 +237,35 @@ impl SshServer {
         let enc_key: [u8; 16] = enc_key[0..16].try_into().unwrap();
 
         let mut cipher: aes::cipher::StreamCipherCoreWrapper<
-            ctr::CtrCore<Aes128, ctr::flavors::Ctr64LE>,
-        > = Aes128Ctr64LE::new(&enc_key.into(), &iv.into());
+            ctr::CtrCore<Aes128, ctr::flavors::Ctr128BE>,
+        > = Aes128Ctr128BE::new(&enc_key.into(), &iv.into());
+
+        // self.cipher = Some(cipher);
 
         // println!("hey");
         // let mut encrypted_binary_codec =
-        //     FramedRead::new(&mut self.stream, EncryptedBinaryPacketCodec::new(cipher));
+        //     FramedRead::new(stream, EncryptedBinaryPacketCodec::new(cipher));
 
-        // println!("you");
         // let enc = encrypted_binary_codec.next().await.unwrap()?;
 
-        // println!("{:?}", enc);
-        // dump::<8>(&enc.payload.inner);
+        // let mut test_buf = [0; 1024];
 
-        let mut test_buf = [0; 1024];
+        // binary_packet_codec.get_mut().read(&mut test_buf).await?;
 
-        binary_packet_codec.get_mut().read(&mut test_buf).await?;
+        // // println!("{:?}", &test_buf[..32]);
+        // // cipher.apply_keystream(&mut test_buf[..32]);
 
-        println!("{:?}", &test_buf[..32]);
-        cipher.apply_keystream(&mut test_buf[..32]);
+        // for chunk in test_buf.chunks_mut(16) {
+        //     cipher.apply_keystream(chunk);
+        // }
 
-        println!("{:?}", &test_buf[..32]);
+        // println!("{}", String::from_utf8_lossy(&test_buf[10..32]));
 
-        Ok(())
+        Ok(cipher)
     }
     async fn alghorithm_negotiation(&mut self) -> io::Result<AlgorithmNegotiation> {
-        let mut binary_packet_codec = Framed::new(&mut self.stream, BinaryPacketCodec::default());
+        let mut stream = self.stream.as_mut().unwrap();
+        let mut binary_packet_codec = Framed::new(&mut stream, BinaryPacketCodec::Header);
 
         let mut binary_packet = binary_packet_codec
             .next()
@@ -253,7 +306,7 @@ impl SshServer {
         let mut buf = BytesMut::new();
 
         loop {
-            self.stream.read_buf(&mut buf).await?;
+            self.stream.as_mut().unwrap().read_buf(&mut buf).await?;
             if buf.windows(2).any(|w| w == b"\r\n") {
                 break;
             }
@@ -278,7 +331,11 @@ impl SshServer {
             (protoversion, softwareversion)
         };
 
-        self.stream.write_all(b"SSH-2.0-OpenSSH_10.0\r\n").await?;
+        self.stream
+            .as_mut()
+            .unwrap()
+            .write_all(b"SSH-2.0-OpenSSH_10.0\r\n")
+            .await?;
 
         Ok(Identification::new(protoversion, softwareversion))
     }
@@ -286,7 +343,7 @@ impl SshServer {
     async fn debug_read(&mut self) -> io::Result<String> {
         let mut buf = BytesMut::new();
 
-        self.stream.read_buf(&mut buf).await?;
+        self.stream.as_mut().unwrap().read_buf(&mut buf).await?;
 
         Ok(String::from_utf8_lossy(&buf).to_string())
     }

@@ -17,3 +17,4 @@ ssh-encoding = "0.2.0"
 ctr = "0.10.0"
 aes = "0.9.0"
 cipher = { version = "0.5.1", features = ["stream-wrapper"] }
+hmac-sha256 = "1.1.14"
