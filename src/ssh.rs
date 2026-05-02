@@ -1,7 +1,7 @@
 use anyhow::Result;
-use tokio_util::bytes::{Buf, Bytes};
+use tokio_util::bytes::{Buf, Bytes, BytesMut};
 
-use crate::BytesExt;
+use crate::{BytesExt, EncodeToBytesMut};
 
 pub trait Parse {
     type Item;
@@ -97,5 +97,17 @@ impl Parse for SshNameList {
             SshNameList { name_list },
             size_of::<u32>() + length as usize,
         ))
+    }
+}
+
+impl EncodeToBytesMut for SshNameList {
+    fn encode_to_bytes_mut(&self, dst: &mut BytesMut) {
+        let name_list_bytes = self.name_list.join(",");
+        let name_list_bytes = Vec::from_iter(name_list_bytes.into_bytes());
+
+        let lenght: [u8; 4] = (name_list_bytes.len() as u32).to_be_bytes();
+
+        dst.extend_from_slice(&lenght);
+        dst.extend_from_slice(&name_list_bytes);
     }
 }

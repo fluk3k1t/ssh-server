@@ -1,9 +1,10 @@
+use anyhow::Error;
 use std::cmp::min;
 use tracing::debug;
 
 use tokio_util::{
-    bytes::{Buf, Bytes, BytesMut},
-    codec::Decoder,
+    bytes::{Buf, BufMut, Bytes, BytesMut},
+    codec::{Decoder, Encoder},
 };
 
 #[derive(Debug)]
@@ -102,5 +103,26 @@ impl Decoder for BinaryPacketProtocol {
                 }
             }
         }
+    }
+}
+
+impl Encoder<Bytes> for BinaryPacketProtocol {
+    type Error = Error;
+
+    fn encode(&mut self, item: Bytes, dst: &mut BytesMut) -> Result<(), Self::Error> {
+        let mut padding_length = 4;
+
+        while (4 + 1 + item.len() + padding_length) % 8 != 0 {
+            padding_length += 1;
+        }
+
+        let packet_length = 1 + item.len() + padding_length;
+
+        dst.put_u32(packet_length as u32);
+        dst.put_u8(padding_length as u8);
+        dst.put(item);
+        dst.put_bytes(0, padding_length);
+
+        Ok(())
     }
 }

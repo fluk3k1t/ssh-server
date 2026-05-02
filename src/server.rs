@@ -1,4 +1,5 @@
 use anyhow::{Context, Result, anyhow};
+use futures::SinkExt;
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::TcpStream,
@@ -11,14 +12,15 @@ use tokio_util::{
 use tracing::info;
 
 use crate::{
-    Algorithm, BinaryPacketProtocol, Identification, Kex, KexAlgorithm, MessageNumber, Parse,
-    RawMessage, SignatureAlgorithm, SshNameList,
+    Algorithm, BinaryPacketProtocol, EncodeToBytesMut, Identification, Kex, KexAlgorithm,
+    MessageNumber, Parse, RawMessage, SignatureAlgorithm, SshNameList,
 };
 
 #[derive(Debug)]
 pub struct SshServer {
     server_identification: Identification,
     client_identification: Option<Identification>,
+    client_kexinit_payload: Option<Bytes>,
     algorithm: Algorithm,
     codec: Framed<TcpStream, BinaryPacketProtocol>,
     state: SshServerState,
@@ -54,6 +56,7 @@ impl SshServerBuilder {
         SshServer {
             server_identification: identification,
             client_identification: None,
+            client_kexinit_payload: None,
             algorithm: Algorithm::default(),
             codec: Framed::new(stream, BinaryPacketProtocol::new()),
             state: SshServerState::WaitForProtoVerEx,
@@ -83,13 +86,26 @@ impl SshServer {
 
             match raw_msg.message_number {
                 MessageNumber::SSH_MSG_KEXINIT => {
+                    // exchange hashの生成で使用
+                    self.client_kexinit_payload = Some(raw_msg.paylaod.clone());
+
                     let (algo, _) = Algorithm::parse(&raw_msg.paylaod)?;
 
                     info!("client: kex_algorithm: {:?}", algo.kex_algorithms[0]);
 
                     info!(
                         "client: server_host_key_algorithm: {:?}",
-                        algo.server_host_key_algorithms.name_list[0]
+                        algo.server_host_key_algorithms[0]
+                    );
+
+                    info!(
+                        "client: encryption_algorithms_client_to_server: {:?}",
+                        algo.encryption_algorithms_client_to_server[0]
+                    );
+
+                    info!(
+                        "client: encryption_algorithms_server_to_client: {:?}",
+                        algo.encryption_algorithms_server_to_client[0]
                     );
 
                     self.algorithm_negotiation(&algo).await?;
@@ -115,15 +131,11 @@ impl SshServer {
     }
 
     pub async fn algorithm_negotiation(&mut self, client_algorithm: &Algorithm) -> Result<()> {
-        // let client_kex_algorithm = match client_algorithm.kex_algorithms.name_list[0].as_str() {
-        //     "ecdh-sha2-nistp256" => KexAlgorithm::EcdhSha2NistP256,
-        //     _ => {
-        //         return Err(anyhow!(
-        //             "unsupported kex algorithm {:?}",
-        //             client_algorithm.kex_algorithms.name_list[0]
-        //         ));
-        //     }
-        // };
+        // println!("")
+
+        let server_algorithm = self.algorithm.encode();
+
+        self.codec.send(server_algorithm).await?;
 
         Ok(())
     }

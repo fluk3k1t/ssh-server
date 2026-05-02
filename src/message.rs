@@ -1,5 +1,6 @@
 use anyhow::Result;
 use anyhow::anyhow;
+use tokio_util::bytes::BufMut;
 use tokio_util::bytes::Bytes;
 use tokio_util::bytes::{Buf, BytesMut};
 
@@ -64,5 +65,17 @@ impl BytesExt for Bytes {
         }
 
         Ok(self.split_to(n))
+    }
+}
+
+pub trait EncodeToBytesMut {
+    fn encode_to_bytes_mut(&self, dst: &mut BytesMut);
+
+    fn encode(&self) -> Bytes {
+        let mut buf = BytesMut::new();
+
+        self.encode_to_bytes_mut(&mut buf);
+
+        buf.freeze()
     }
 }
