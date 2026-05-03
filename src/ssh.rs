@@ -155,18 +155,24 @@ pub trait SshBytesMut {
         src.encode_to_bytes_mut(&mut self);
         self
     }
+    fn put_bytes(self, from: Bytes) -> Self;
     fn put_ssh_string(self, str: impl Into<Bytes>) -> Self;
-    fn put_mpint(self, mpint: impl Into<Bytes>) -> Self;
+    fn put_ssh_mpint(self, mpint: impl Into<Bytes>) -> Self;
 }
 
 impl SshBytesMut for BytesMut {
+    fn put_bytes(mut self, from: Bytes) -> Self {
+        self.extend(from);
+        self
+    }
+
     fn put_ssh_string(mut self, str: impl Into<Bytes>) -> Self {
         let target = SshString::new(str.into());
         target.encode_to_bytes_mut(&mut self);
         self
     }
 
-    fn put_mpint(mut self, mpint: impl Into<Bytes>) -> Self {
+    fn put_ssh_mpint(mut self, mpint: impl Into<Bytes>) -> Self {
         SshMpint::new(mpint).encode_to_bytes_mut(&mut self);
         self
     }

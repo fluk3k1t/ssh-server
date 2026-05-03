@@ -1,3 +1,7 @@
+use aes::{
+    Aes128,
+    cipher::{KeyIvInit, StreamCipher},
+};
 use anyhow::{Context, Result, anyhow};
 use futures::SinkExt;
 use p256::{ecdh::EphemeralSecret, elliptic_curve::rand_core::OsRng};
@@ -18,6 +22,8 @@ use crate::{
     KexAlgorithm, MessageNumber, Parse, RawMessage, RawMessageBuilder, SharedSecretKey,
     SignatureAlgorithm, SigningKey, SshBytesMut, SshNameList, SshString, VerifyingKey,
 };
+
+type Aes128Ctr128BE = ctr::Ctr128BE<aes::Aes128>;
 
 #[derive(Debug)]
 pub struct SshServer {
@@ -192,7 +198,7 @@ impl SshServer {
             .put_ssh_string(K_S.encode())
             .put(Q_C.clone())
             .put(Q_S.clone())
-            .put(K);
+            .put_ssh_mpint(K.encode());
 
         let H = Sha256::digest(concatenation);
         let sign = server_host_key.sign(&H);
@@ -204,6 +210,44 @@ impl SshServer {
             .build();
 
         self.codec.send(edch_reply.to_bytes()).await?;
+
+        let mut new_keys = self.codec.next().await.unwrap()?;
+
+        let new_keys = RawMessageBuilder::new(MessageNumber::SSH_MSG_NEWKEYS).build();
+        self.codec.send(new_keys.to_bytes()).await?;
+
+        let session_id = H.clone();
+        let iv = BytesMut::new()
+            .put_ssh_mpint(K.encode())
+            .put_bytes(Bytes::from_iter(H.clone()))
+            .put_bytes(Bytes::from("A"))
+            .put_bytes(Bytes::from_iter(session_id.clone()));
+
+        let iv = Sha256::digest(iv);
+        let iv: [u8; 16] = iv[0..16].try_into().unwrap();
+
+        let enc_key_material = BytesMut::new()
+            .put_ssh_mpint(K.encode())
+            .put_bytes(Bytes::from_iter(H.clone()))
+            .put_bytes(Bytes::from("C"))
+            .put_bytes(Bytes::from_iter(session_id.clone()));
+        let enc_key = Sha256::digest(enc_key_material);
+        let enc_key: [u8; 16] = enc_key[0..16].try_into().unwrap();
+
+        let mut cipher: aes::cipher::StreamCipherCoreWrapper<
+            ctr::CtrCore<Aes128, ctr::flavors::Ctr128BE>,
+        > = Aes128Ctr128BE::new(&enc_key.into(), &iv.into());
+
+        println!("{:?}", iv);
+
+        let mut test_buf = [0; 1024];
+
+        self.codec.get_mut().read(&mut test_buf).await?;
+
+        println!("{:?}", &test_buf[..32]);
+        cipher.apply_keystream(&mut test_buf[..32]);
+
+        println!("{:?}", String::from_utf8_lossy(&test_buf[10..32]));
 
         Ok(())
     }

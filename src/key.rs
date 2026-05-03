@@ -111,14 +111,6 @@ impl EncodeToBytesMut for VerifyingKey {
         };
 
         SshString::new(verifing_key_blob).encode_to_bytes_mut(dst);
-
-        // SshString::new(blob.clone()).encode_to_bytes_mut(dst);
-
-        // let mut test = BytesMut::new();
-
-        // SshString::new(blob).encode_to_bytes_mut(&mut test);
-
-        // println!("{:?}", &test);
     }
 }
 
@@ -172,6 +164,8 @@ impl EncodeToBytesMut for SharedSecretKey {
             }
         };
 
-        SshMpint::new(raw_secret_bytes).encode_to_bytes_mut(dst);
+        dst.put(&raw_secret_bytes[..]);
+
+        // SshMpint::new(raw_secret_bytes).encode_to_bytes_mut(dst);
     }
 }
