@@ -91,7 +91,10 @@ impl SshServer {
                 MessageNumber::SSH_MSG_KEXINIT => {
                     info!("recv: SSH_MSG_KEXINIT");
 
-                    self.client_kexinit_payload = Some(raw_msg.paylaod.clone());
+                    let mut client_kexinit_payload = BytesMut::new();
+                    client_kexinit_payload.put_u8(raw_msg.message_number as u8);
+                    client_kexinit_payload.extend(raw_msg.paylaod.clone());
+                    self.client_kexinit_payload = Some(client_kexinit_payload.freeze());
 
                     let (client_algorithm, _) = Algorithm::parse(&raw_msg.paylaod)?;
 
