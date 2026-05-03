@@ -18,20 +18,20 @@ use tokio_util::{
 use tracing::info;
 
 use crate::{
-    Algorithm, BinaryPacketProtocol, EncodeToBytesMut, EphemeralPublicKey, Identification, Kex,
-    KexAlgorithm, MessageNumber, Parse, RawMessage, RawMessageBuilder, SharedSecretKey,
-    SignatureAlgorithm, SigningKey, SshBytesMut, SshNameList, SshString, VerifyingKey,
+    Algorithm, BinaryPacketProtocol, Cipher, Codec, EncodeToBytesMut, EncryptedBinaryPacketCodec,
+    EphemeralPublicKey, Identification, Kex, KexAlgorithm, MessageNumber, Parse, RawMessage,
+    RawMessageBuilder, SharedSecretKey, SignatureAlgorithm, SigningKey, SshBytesMut, SshNameList,
+    SshString, VerifyingKey,
 };
 
-type Aes128Ctr128BE = ctr::Ctr128BE<aes::Aes128>;
-
-#[derive(Debug)]
+pub type Aes128Ctr128BE = ctr::Ctr128BE<aes::Aes128>;
 pub struct SshServer {
     server_identification: Identification,
     client_identification: Option<String>,
     client_kexinit_payload: Option<Bytes>,
     algorithm: Algorithm,
-    codec: Framed<TcpStream, BinaryPacketProtocol>,
+    codec: Framed<TcpStream, Codec>,
+    cipher: Option<Aes128Ctr128BE>,
     state: SshServerState,
 }
 
@@ -67,7 +67,8 @@ impl SshServerBuilder {
             client_identification: None,
             client_kexinit_payload: None,
             algorithm: Algorithm::default(),
-            codec: Framed::new(stream, BinaryPacketProtocol::new()),
+            codec: Framed::new(stream, Codec::Plain(BinaryPacketProtocol::new())),
+            cipher: None,
             state: SshServerState::WaitForProtoVerEx,
         }
     }
@@ -85,22 +86,23 @@ impl SshServer {
                 continue;
             }
 
-            let packet = self
+            let mut packet: BytesMut = self
                 .codec
                 .next()
                 .await
-                .context("failed to read binary packet for some reasons")??;
+                .context("failed to read binary packet for some reasons")??
+                .into();
 
-            let raw_msg = RawMessage::parse(&packet)?;
+            if let Some(cipher) = self.cipher.as_mut() {
+                cipher.apply_keystream(&mut packet);
+            }
+
+            let raw_msg = RawMessage::parse(&packet.freeze())?;
+            info!("recv: {:?}", raw_msg.message_number);
 
             match raw_msg.message_number {
                 MessageNumber::SSH_MSG_KEXINIT => {
-                    info!("recv: SSH_MSG_KEXINIT");
-
-                    let mut client_kexinit_payload = BytesMut::new();
-                    client_kexinit_payload.put_u8(raw_msg.message_number as u8);
-                    client_kexinit_payload.extend(raw_msg.paylaod.clone());
-                    self.client_kexinit_payload = Some(client_kexinit_payload.freeze());
+                    self.client_kexinit_payload = Some(raw_msg.to_bytes());
 
                     let (client_algorithm, _) = Algorithm::parse(&raw_msg.paylaod)?;
 
@@ -127,12 +129,14 @@ impl SshServer {
                     self.algorithm_negotiation(&client_algorithm).await?;
                 }
                 MessageNumber::SSH_MSG_KEX_ECDH_INIT => {
-                    info!("recv: SSH_MSG_KEX_ECDH_INIT");
-
                     let kex = Kex::parse(&raw_msg.paylaod, &self.algorithm)?;
                     self.kex_exchange(&kex).await?;
                 }
-                _ => todo!(),
+                MessageNumber::SSH_MSG_SERVICE_REQUEST => {}
+                _ => {
+                    println!("{:?}", raw_msg);
+                    todo!();
+                }
             }
         }
     }
@@ -234,20 +238,25 @@ impl SshServer {
         let enc_key = Sha256::digest(enc_key_material);
         let enc_key: [u8; 16] = enc_key[0..16].try_into().unwrap();
 
-        let mut cipher: aes::cipher::StreamCipherCoreWrapper<
-            ctr::CtrCore<Aes128, ctr::flavors::Ctr128BE>,
-        > = Aes128Ctr128BE::new(&enc_key.into(), &iv.into());
+        let cipher = Aes128Ctr128BE::new(&enc_key.into(), &iv.into());
+        // self.codec = self.codec.upgrade(cipher);
+        // self.cipher = Some(cipher);
+        // self.codec = self.codec.
+        self.codec.codec_mut().upgrade(cipher);
 
-        println!("{:?}", iv);
+        // let mut stream = self.codec
+        // self.codec = Codec::Encrypted(Framed::)
 
-        let mut test_buf = [0; 1024];
+        // println!("{:?}", iv);
 
-        self.codec.get_mut().read(&mut test_buf).await?;
+        // let mut test_buf = [0; 1024];
 
-        println!("{:?}", &test_buf[..32]);
-        cipher.apply_keystream(&mut test_buf[..32]);
+        // self.codec.get_mut().read(&mut test_buf).await?;
 
-        println!("{:?}", String::from_utf8_lossy(&test_buf[10..32]));
+        // println!("{:?}", &test_buf[..32]);
+        // cipher.apply_keystream(&mut test_buf[..32]);
+
+        // println!("{:?}", String::from_utf8_lossy(&test_buf[10..32]));
 
         Ok(())
     }
