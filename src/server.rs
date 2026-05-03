@@ -22,8 +22,7 @@ use crate::{
 #[derive(Debug)]
 pub struct SshServer {
     server_identification: Identification,
-    client_identification: Option<Identification>,
-    client_identification_raw: Option<String>,
+    client_identification: Option<String>,
     client_kexinit_payload: Option<Bytes>,
     algorithm: Algorithm,
     codec: Framed<TcpStream, BinaryPacketProtocol>,
@@ -60,7 +59,6 @@ impl SshServerBuilder {
         SshServer {
             server_identification: identification,
             client_identification: None,
-            client_identification_raw: None,
             client_kexinit_payload: None,
             algorithm: Algorithm::default(),
             codec: Framed::new(stream, BinaryPacketProtocol::new()),
@@ -177,7 +175,7 @@ impl SshServer {
             }
         }?;
 
-        let V_C: String = self.client_identification_raw.as_ref().unwrap().clone();
+        let V_C: String = self.client_identification.as_ref().unwrap().clone();
         let V_S: String = self.server_identification.to_crlf_excluded_str();
         let I_C = self.client_kexinit_payload.clone().context("unreachable")?;
         let I_S = self.algorithm.encode();
@@ -186,14 +184,12 @@ impl SshServer {
         let Q_S: EphemeralPublicKey = server_emphemeral_key.clone();
         let K: SharedSecretKey = shared_secret;
 
-        println!("{:?}", V_C);
-
         let concatenation: BytesMut = BytesMut::new()
             .put_ssh_string(V_C)
             .put_ssh_string(V_S)
-            .put(SshString::new(I_C))
-            .put(SshString::new(I_S))
-            .put(K_S.clone())
+            .put_ssh_string(I_C)
+            .put_ssh_string(I_S)
+            .put_ssh_string(K_S.encode())
             .put(Q_C.clone())
             .put(Q_S.clone())
             .put(K);
@@ -202,7 +198,7 @@ impl SshServer {
         let sign = server_host_key.sign(&H);
 
         let edch_reply = RawMessageBuilder::new(MessageNumber::SSH_MSG_KEX_ECDH_REPLY)
-            .put(K_S)
+            .put_ssh_string(K_S.encode())
             .put(Q_S)
             .put(sign)
             .build();
@@ -213,21 +209,6 @@ impl SshServer {
     }
 
     pub async fn algorithm_negotiation(&mut self, client_algorithm: &Algorithm) -> Result<()> {
-        // self.algorithm.cookie = client_algorithm.cookie;
-        // self.algorithm.compression_algorithms_client_to_server = client_algorithm
-        //     .compression_algorithms_client_to_server
-        //     .clone();
-        // self.algorithm.compression_algorithms_server_to_client = client_algorithm
-        //     .compression_algorithms_server_to_client
-        //     .clone();
-        // self.algorithm.languages_client_to_server =
-        //     client_algorithm.languages_client_to_server.clone();
-
-        // self.algorithm.languages_server_to_client =
-        //     client_algorithm.languages_server_to_client.clone();
-
-        // self.algorithm.first_kex_packet_follows = client_algorithm.first_kex_packet_follows.clone();
-
         let server_algorithm = self.algorithm.encode();
 
         self.codec.send(server_algorithm).await?;
@@ -246,8 +227,9 @@ impl SshServer {
         }
 
         let client_identification = String::from_utf8_lossy(&buf).to_string();
-        self.client_identification_raw =
+        self.client_identification =
             Some(client_identification.trim_end_matches("\r\n").to_string());
+
         let mut client_identification = client_identification.split(" ");
         let client_identification = client_identification.next().unwrap().to_string();
 
@@ -268,11 +250,9 @@ impl SshServer {
             (protoversion, softwareversion)
         };
 
-        let client_identification = Identification::new(protoversion, softwareversion);
-
         info!(
             "client: identification: {}",
-            client_identification.to_crlf_excluded_str()
+            self.client_identification.clone().unwrap()
         );
 
         self.codec
@@ -281,8 +261,6 @@ impl SshServer {
                 format!("{}\r\n", self.server_identification.to_crlf_excluded_str()).as_bytes(),
             )
             .await?;
-
-        self.client_identification = Some(client_identification);
 
         Ok(())
     }

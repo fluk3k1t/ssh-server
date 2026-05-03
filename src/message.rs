@@ -5,6 +5,8 @@ use tokio_util::bytes::Bytes;
 use tokio_util::bytes::{Buf, BytesMut};
 
 use crate::BinaryPacket;
+use crate::SshBytesMut;
+use crate::SshString;
 
 #[derive(Debug)]
 pub struct RawMessage {
@@ -17,7 +19,7 @@ impl RawMessage {
         let mut bytes = BytesMut::new();
 
         bytes.put_u8(self.message_number.clone() as u8);
-        bytes.put(self.paylaod.clone());
+        bytes.extend(self.paylaod.clone());
 
         bytes.freeze()
     }
@@ -81,6 +83,11 @@ impl RawMessageBuilder {
 
     pub fn put(mut self, src: impl EncodeToBytesMut) -> Self {
         src.encode_to_bytes_mut(&mut self.paylaod);
+        self
+    }
+
+    pub fn put_ssh_string(mut self, str: impl Into<Bytes>) -> Self {
+        SshString::new(str).encode_to_bytes_mut(&mut self.paylaod);
         self
     }
 

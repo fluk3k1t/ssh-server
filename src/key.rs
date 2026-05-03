@@ -86,22 +86,23 @@ pub enum VerifyingKey {
     EcdsaSha2NistP256(p256::ecdsa::VerifyingKey),
 }
 
-impl Into<String> for &VerifyingKey {
-    fn into(self) -> String {
+impl VerifyingKey {
+    fn as_str(&self) -> String {
         match self {
             VerifyingKey::EcdsaSha2NistP256(_) => "ecdsa-sha2-nistp256",
         }
         .to_string()
     }
 }
+
 use std::fmt::Debug;
 
 impl EncodeToBytesMut for VerifyingKey {
     fn encode_to_bytes_mut(&self, dst: &mut impl BufMut) {
         let mut blob = BytesMut::new();
 
-        SshString::from_str(self).encode_to_bytes_mut(&mut blob);
-        SshString::from_str("nistp256").encode_to_bytes_mut(&mut blob);
+        SshString::from_str(self.as_str()).encode_to_bytes_mut(dst);
+        SshString::from_str("nistp256").encode_to_bytes_mut(dst);
 
         let verifing_key_blob = match self {
             VerifyingKey::EcdsaSha2NistP256(verifying_key) => {
@@ -109,9 +110,9 @@ impl EncodeToBytesMut for VerifyingKey {
             }
         };
 
-        SshString::new(verifing_key_blob).encode_to_bytes_mut(&mut blob);
+        SshString::new(verifing_key_blob).encode_to_bytes_mut(dst);
 
-        SshString::new(blob.clone()).encode_to_bytes_mut(dst);
+        // SshString::new(blob.clone()).encode_to_bytes_mut(dst);
 
         // let mut test = BytesMut::new();
 
