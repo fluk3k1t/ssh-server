@@ -4,12 +4,23 @@ use tokio_util::bytes::BufMut;
 use tokio_util::bytes::Bytes;
 use tokio_util::bytes::{Buf, BytesMut};
 
-use crate::{BinaryPacket, PublicKey};
+use crate::BinaryPacket;
 
 #[derive(Debug)]
 pub struct RawMessage {
     pub message_number: MessageNumber,
     pub paylaod: Bytes,
+}
+
+impl RawMessage {
+    pub fn to_bytes(&self) -> Bytes {
+        let mut bytes = BytesMut::new();
+
+        bytes.put_u8(self.message_number.clone() as u8);
+        bytes.put(self.paylaod.clone());
+
+        bytes.freeze()
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -54,6 +65,33 @@ impl RawMessage {
     }
 }
 
+#[derive(Debug, Clone)]
+pub struct RawMessageBuilder {
+    message_number: MessageNumber,
+    paylaod: BytesMut,
+}
+
+impl RawMessageBuilder {
+    pub fn new(message_number: MessageNumber) -> Self {
+        RawMessageBuilder {
+            message_number,
+            paylaod: BytesMut::new(),
+        }
+    }
+
+    pub fn put(mut self, src: impl EncodeToBytesMut) -> Self {
+        src.encode_to_bytes_mut(&mut self.paylaod);
+        self
+    }
+
+    pub fn build(self) -> RawMessage {
+        RawMessage {
+            message_number: self.message_number,
+            paylaod: self.paylaod.freeze(),
+        }
+    }
+}
+
 pub trait BytesExt {
     fn try_split_to(&mut self, n: usize) -> Result<Bytes>;
 }
@@ -69,7 +107,7 @@ impl BytesExt for Bytes {
 }
 
 pub trait EncodeToBytesMut {
-    fn encode_to_bytes_mut(&self, dst: &mut BytesMut);
+    fn encode_to_bytes_mut(&self, dst: &mut impl BufMut);
 
     fn encode(&self) -> Bytes {
         let mut buf = BytesMut::new();

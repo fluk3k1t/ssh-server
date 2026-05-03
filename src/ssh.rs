@@ -1,5 +1,5 @@
-use anyhow::Result;
-use tokio_util::bytes::{Buf, Bytes, BytesMut};
+use anyhow::{Error, Result};
+use tokio_util::bytes::{Buf, BufMut, Bytes, BytesMut};
 
 use crate::{BytesExt, EncodeToBytesMut};
 
@@ -36,16 +36,30 @@ impl Identification {
         }
     }
 
-    pub fn as_crlf_excluded_str(&self) -> String {
+    pub fn to_crlf_excluded_str(&self) -> String {
         format!("SSH-{}-{}", self.protoversion, self.softwareversion)
             .trim_end_matches("\r\n")
             .to_string()
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct SshString {
     inner: Bytes,
+}
+
+impl SshString {
+    pub fn new(inner: impl Into<Bytes>) -> Self {
+        SshString {
+            inner: inner.into(),
+        }
+    }
+
+    pub fn from_str(str: impl Into<String>) -> Self {
+        SshString {
+            inner: Bytes::from(str.into()),
+        }
+    }
 }
 
 impl Parse for SshString {
@@ -61,6 +75,27 @@ impl Parse for SshString {
         let str = src.try_split_to(length as usize)?;
 
         Ok((SshString { inner: str }, size_of::<u32>() + length as usize))
+    }
+}
+
+impl SshString {
+    pub fn as_bytes(&self) -> Bytes {
+        self.inner.clone()
+    }
+}
+
+impl EncodeToBytesMut for SshString {
+    fn encode_to_bytes_mut(&self, dst: &mut impl BufMut) {
+        let length = self.inner.len();
+
+        dst.put_u32(length as u32);
+        dst.put(&self.inner[..]);
+    }
+}
+
+impl Into<String> for SshString {
+    fn into(self) -> String {
+        String::from_utf8_lossy(&self.inner).to_string()
     }
 }
 
@@ -101,13 +136,72 @@ impl Parse for SshNameList {
 }
 
 impl EncodeToBytesMut for SshNameList {
-    fn encode_to_bytes_mut(&self, dst: &mut BytesMut) {
+    fn encode_to_bytes_mut(&self, dst: &mut impl BufMut) {
         let name_list_bytes = self.name_list.join(",");
         let name_list_bytes = Vec::from_iter(name_list_bytes.into_bytes());
 
         let lenght: [u8; 4] = (name_list_bytes.len() as u32).to_be_bytes();
 
-        dst.extend_from_slice(&lenght);
-        dst.extend_from_slice(&name_list_bytes);
+        dst.put(&lenght[..]);
+        dst.put(&name_list_bytes[..]);
+    }
+}
+
+pub trait SshBytesMut {
+    fn put(mut self, src: impl EncodeToBytesMut) -> Self
+    where
+        Self: Sized + BufMut,
+    {
+        src.encode_to_bytes_mut(&mut self);
+        self
+    }
+    fn put_ssh_string(self, str: impl Into<String>) -> Self;
+}
+
+impl SshBytesMut for BytesMut {
+    fn put_ssh_string(mut self, str: impl Into<String>) -> Self {
+        let target = SshString::from_str(str.into());
+        target.encode_to_bytes_mut(&mut self);
+        self
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct SshMpint {
+    inner: Bytes,
+}
+
+impl SshMpint {
+    pub fn new(inner: impl Into<Bytes>) -> Self {
+        SshMpint {
+            inner: inner.into(),
+        }
+    }
+}
+
+pub(crate) fn encode_mpint(s: &[u8], w: &mut impl BufMut) -> Result<()> {
+    // Skip initial 0s.
+    let mut i = 0;
+    while i < s.len() && s[i] == 0 {
+        i += 1
+    }
+    // If the first non-zero is >= 128, write its length (u32, BE), followed by 0.
+    if s[i] & 0x80 != 0 {
+        // ((s.len() - i + 1) as u32).encode(w)?;
+        w.put_u32(((s.len() - i + 1) as u32));
+        // 0u8.encode(w)?;
+        w.put_u8(0);
+    } else {
+        // ((s.len() - i) as u32).encode(w)?;
+        w.put_u32(((s.len() - i) as u32));
+    }
+    w.put(&s[i..]);
+
+    Ok(())
+}
+
+impl EncodeToBytesMut for SshMpint {
+    fn encode_to_bytes_mut(&self, dst: &mut impl BufMut) {
+        encode_mpint(&self.inner, dst).unwrap();
     }
 }

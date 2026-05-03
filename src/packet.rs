@@ -41,6 +41,7 @@ impl Decoder for BinaryPacketProtocol {
     type Error = anyhow::Error;
 
     fn decode(&mut self, src: &mut BytesMut) -> Result<Option<Self::Item>, Self::Error> {
+        println!("decode {:?}", src);
         match &mut self.state {
             BinaryPacketProtocolState::Header => {
                 if src.remaining() < size_of::<u32>() + size_of::<u8>() {

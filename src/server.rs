@@ -1,19 +1,22 @@
 use anyhow::{Context, Result, anyhow};
 use futures::SinkExt;
+use p256::{ecdh::EphemeralSecret, elliptic_curve::rand_core::OsRng};
+use sha2::{Digest, Sha256};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::TcpStream,
 };
 use tokio_stream::StreamExt;
 use tokio_util::{
-    bytes::{Bytes, BytesMut},
+    bytes::{Buf, BufMut, Bytes, BytesMut},
     codec::Framed,
 };
 use tracing::info;
 
 use crate::{
-    Algorithm, BinaryPacketProtocol, EncodeToBytesMut, Identification, Kex, KexAlgorithm,
-    MessageNumber, Parse, RawMessage, SignatureAlgorithm, SshNameList,
+    Algorithm, BinaryPacketProtocol, EncodeToBytesMut, EphemeralPublicKey, Identification, Kex,
+    KexAlgorithm, MessageNumber, Parse, RawMessage, RawMessageBuilder, SharedSecretKey,
+    SignatureAlgorithm, SigningKey, SshBytesMut, SshNameList, SshString, VerifyingKey,
 };
 
 #[derive(Debug)]
@@ -86,29 +89,39 @@ impl SshServer {
 
             match raw_msg.message_number {
                 MessageNumber::SSH_MSG_KEXINIT => {
-                    // exchange hashの生成で使用
+                    info!("recv: SSH_MSG_KEXINIT");
+
                     self.client_kexinit_payload = Some(raw_msg.paylaod.clone());
 
-                    let (algo, _) = Algorithm::parse(&raw_msg.paylaod)?;
+                    let (client_algorithm, _) = Algorithm::parse(&raw_msg.paylaod)?;
 
-                    info!("client: kex_algorithm: {:?}", algo.kex_algorithms[0]);
+                    info!(
+                        "client: kex_algorithm: {:?}",
+                        client_algorithm.kex_algorithms[0]
+                    );
 
                     info!(
                         "client: server_host_key_algorithm: {:?}",
-                        algo.server_host_key_algorithms[0]
+                        client_algorithm.server_host_key_algorithms[0]
                     );
 
                     info!(
                         "client: encryption_algorithms_client_to_server: {:?}",
-                        algo.encryption_algorithms_client_to_server[0]
+                        client_algorithm.encryption_algorithms_client_to_server[0]
                     );
 
                     info!(
                         "client: encryption_algorithms_server_to_client: {:?}",
-                        algo.encryption_algorithms_server_to_client[0]
+                        client_algorithm.encryption_algorithms_server_to_client[0]
                     );
 
-                    self.algorithm_negotiation(&algo).await?;
+                    self.algorithm_negotiation(&client_algorithm).await?;
+                }
+                MessageNumber::SSH_MSG_KEX_ECDH_INIT => {
+                    info!("recv: SSH_MSG_KEX_ECDH_INIT");
+
+                    let kex = Kex::parse(&raw_msg.paylaod, &self.algorithm)?;
+                    self.kex_exchange(&kex).await?;
                 }
                 _ => todo!(),
             }
@@ -130,9 +143,77 @@ impl SshServer {
         }
     }
 
-    pub async fn algorithm_negotiation(&mut self, client_algorithm: &Algorithm) -> Result<()> {
-        // println!("")
+    pub async fn kex_exchange(&mut self, kex: &Kex) -> Result<()> {
+        let (server_host_key, server_public_key) =
+            match &self.algorithm.server_host_key_algorithms[0] {
+                SignatureAlgorithm::EcdsaSha2NistP256 => Ok(SigningKey::ecdsa()),
+                SignatureAlgorithm::Unsupported(unsupported) => {
+                    Err(anyhow!("unsupported signature: {:?}", unsupported))
+                }
+            }?;
 
+        let (shared_secret, server_emphemeral_key) = match &self.algorithm.kex_algorithms[0] {
+            KexAlgorithm::EcdhSha2NistP256 => {
+                let server_secret = EphemeralSecret::random(&mut OsRng);
+                let server_emphemeral_key =
+                    EphemeralPublicKey::EcdaNistP256(server_secret.public_key());
+                let shared_secret = match kex.client_ephemeral_public_key {
+                    EphemeralPublicKey::EcdaNistP256(client_ephemeral_public_key) => {
+                        SharedSecretKey::EcdaNistP256(
+                            server_secret.diffie_hellman(&client_ephemeral_public_key),
+                        )
+                    }
+                };
+
+                Ok((shared_secret, server_emphemeral_key))
+            }
+            KexAlgorithm::Unsupported(unsupported) => {
+                Err(anyhow!("unsupported kex exchange: {:?}", unsupported))
+            }
+        }?;
+
+        let V_C: String = self
+            .client_identification
+            .clone()
+            .context("unreachable")?
+            .to_crlf_excluded_str();
+        let V_S: String = self.server_identification.to_crlf_excluded_str();
+        let mut I_C = self.client_kexinit_payload.clone().context("unreachable")?;
+        // I_C.get_u8();
+        let mut I_S = self.algorithm.encode();
+        // I_S.get_u8();?
+        let K_S: VerifyingKey = server_public_key;
+        let Q_C: EphemeralPublicKey = kex.client_ephemeral_public_key.clone();
+        let Q_S: EphemeralPublicKey = server_emphemeral_key.clone();
+        let K: SharedSecretKey = shared_secret;
+
+        println!("{:?}", V_C);
+
+        let concatenation: BytesMut = BytesMut::new()
+            .put_ssh_string(V_C)
+            .put_ssh_string(V_S)
+            .put(SshString::new(I_C))
+            .put(SshString::new(I_S))
+            .put(K_S.clone())
+            .put(Q_C.clone())
+            .put(Q_S.clone())
+            .put(K);
+
+        let H = Sha256::digest(concatenation);
+        let sign = server_host_key.sign(&H);
+
+        let edch_reply = RawMessageBuilder::new(MessageNumber::SSH_MSG_KEX_ECDH_REPLY)
+            .put(K_S)
+            .put(Q_S)
+            .put(sign)
+            .build();
+
+        self.codec.send(edch_reply.to_bytes()).await?;
+
+        Ok(())
+    }
+
+    pub async fn algorithm_negotiation(&mut self, client_algorithm: &Algorithm) -> Result<()> {
         let server_algorithm = self.algorithm.encode();
 
         self.codec.send(server_algorithm).await?;
@@ -173,13 +254,13 @@ impl SshServer {
 
         info!(
             "client: identification: {}",
-            client_identification.as_crlf_excluded_str()
+            client_identification.to_crlf_excluded_str()
         );
 
         self.codec
             .get_mut()
             .write_all(
-                format!("{}\r\n", self.server_identification.as_crlf_excluded_str()).as_bytes(),
+                format!("{}\r\n", self.server_identification.to_crlf_excluded_str()).as_bytes(),
             )
             .await?;
 

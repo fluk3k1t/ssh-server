@@ -1,7 +1,8 @@
-use anyhow::Result;
+use anyhow::{Result, anyhow};
+use p256::EncodedPoint;
 use tokio_util::bytes::Bytes;
 
-use crate::{Parse, SshNameList, SshString};
+use crate::{Algorithm, EphemeralPublicKey, Parse, SshNameList, SshString};
 
 #[derive(Debug, Clone)]
 pub enum KexAlgorithm {
@@ -103,17 +104,31 @@ impl Into<String> for &MacAlgorithm {
 }
 
 #[derive(Debug)]
-pub struct Kex {}
+pub struct Kex {
+    pub client_ephemeral_public_key: EphemeralPublicKey,
+}
 
-impl Kex {}
+impl Kex {
+    pub fn parse(src: &Bytes, agreed_algorithm: &Algorithm) -> Result<Self> {
+        let mut src = src.clone();
 
-impl Parse for Kex {
-    type Item = Bytes;
+        let (client_public_key, _) = SshString::parse(&mut src)?;
 
-    fn parse(src: &Self::Item) -> Result<(Self, usize)>
-    where
-        Self: Sized,
-    {
-        todo!()
+        match &agreed_algorithm.encryption_algorithms_client_to_server[0] {
+            CipherAlgorithm::Aes128Ctr => {
+                let encoded_point = EncodedPoint::from_bytes(client_public_key.as_bytes())?;
+                let client_ephemeral_public_key =
+                    p256::PublicKey::from_sec1_bytes(encoded_point.as_bytes())?;
+
+                Ok(Kex {
+                    client_ephemeral_public_key: EphemeralPublicKey::EcdaNistP256(
+                        client_ephemeral_public_key,
+                    ),
+                })
+            }
+            CipherAlgorithm::Unsupported(unsupported) => {
+                Err(anyhow!("unsupported algorithm: {:?}", unsupported))
+            }
+        }
     }
 }

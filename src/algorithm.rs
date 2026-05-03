@@ -49,7 +49,7 @@ impl<T> EncodeToBytesMut for Algorithms<T>
 where
     for<'a> &'a T: Into<String>,
 {
-    fn encode_to_bytes_mut(&self, dst: &mut BytesMut) {
+    fn encode_to_bytes_mut(&self, dst: &mut impl BufMut) {
         SshNameList::new(self.into_iter().map(|k| k.into()).collect::<Vec<String>>())
             .encode_to_bytes_mut(dst);
     }
@@ -125,7 +125,7 @@ impl Parse for Algorithm {
 }
 
 impl EncodeToBytesMut for Algorithm {
-    fn encode_to_bytes_mut(&self, dst: &mut BytesMut) {
+    fn encode_to_bytes_mut(&self, dst: &mut impl BufMut) {
         dst.put_u8(MessageNumber::SSH_MSG_KEXINIT as u8);
         dst.put(&self.cookie[..]);
 
