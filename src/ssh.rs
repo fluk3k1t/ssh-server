@@ -179,23 +179,48 @@ impl SshMpint {
     }
 }
 
+// pub(crate) fn encode_mpint(s: &[u8], w: &mut impl BufMut) -> Result<()> {
+//     // Skip initial 0s.
+//     let mut i = 0;
+//     while i < s.len() && s[i] == 0 {
+//         i += 1
+//     }
+//     // If the first non-zero is >= 128, write its length (u32, BE), followed by 0.
+//     if s[i] & 0x80 != 0 {
+//         // ((s.len() - i + 1) as u32).encode(w)?;
+//         w.put_u32(((s.len() - i + 1) as u32));
+//         // 0u8.encode(w)?;
+//         w.put_u8(0);
+//     } else {
+//         // ((s.len() - i) as u32).encode(w)?;
+//         w.put_u32(((s.len() - i) as u32));
+//     }
+//     w.put(&s[i..]);
+
+//     Ok(())
+// }
 pub(crate) fn encode_mpint(s: &[u8], w: &mut impl BufMut) -> Result<()> {
     // Skip initial 0s.
-    let mut i = 0;
-    while i < s.len() && s[i] == 0 {
-        i += 1
-    }
-    // If the first non-zero is >= 128, write its length (u32, BE), followed by 0.
-    if s[i] & 0x80 != 0 {
-        // ((s.len() - i + 1) as u32).encode(w)?;
-        w.put_u32(((s.len() - i + 1) as u32));
-        // 0u8.encode(w)?;
+    let s = {
+        let mut i = 0;
+        while i < s.len() && s[i] == 0 {
+            i += 1;
+        }
+        &s[i..]
+    };
+
+    if s.is_empty() {
+        // ゼロ値：長さ0のmpint
+        w.put_u32(0);
+    } else if s[0] & 0x80 != 0 {
+        // 先頭ビットが立っている → 0x00 パディングが必要
+        w.put_u32((s.len() + 1) as u32);
         w.put_u8(0);
+        w.put(s);
     } else {
-        // ((s.len() - i) as u32).encode(w)?;
-        w.put_u32(((s.len() - i) as u32));
+        w.put_u32(s.len() as u32);
+        w.put(s);
     }
-    w.put(&s[i..]);
 
     Ok(())
 }

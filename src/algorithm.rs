@@ -147,6 +147,6 @@ impl EncodeToBytesMut for Algorithm {
         self.languages_server_to_client.encode_to_bytes_mut(dst);
 
         dst.put_u8(if self.first_kex_packet_follows { 1 } else { 0 });
-        dst.put_bytes(b'0', 4);
+        dst.put_bytes(0, 4);
     }
 }

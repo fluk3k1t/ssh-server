@@ -23,6 +23,7 @@ use crate::{
 pub struct SshServer {
     server_identification: Identification,
     client_identification: Option<Identification>,
+    client_identification_raw: Option<String>,
     client_kexinit_payload: Option<Bytes>,
     algorithm: Algorithm,
     codec: Framed<TcpStream, BinaryPacketProtocol>,
@@ -59,6 +60,7 @@ impl SshServerBuilder {
         SshServer {
             server_identification: identification,
             client_identification: None,
+            client_identification_raw: None,
             client_kexinit_payload: None,
             algorithm: Algorithm::default(),
             codec: Framed::new(stream, BinaryPacketProtocol::new()),
@@ -175,16 +177,10 @@ impl SshServer {
             }
         }?;
 
-        let V_C: String = self
-            .client_identification
-            .clone()
-            .context("unreachable")?
-            .to_crlf_excluded_str();
+        let V_C: String = self.client_identification_raw.as_ref().unwrap().clone();
         let V_S: String = self.server_identification.to_crlf_excluded_str();
-        let mut I_C = self.client_kexinit_payload.clone().context("unreachable")?;
-        // I_C.get_u8();
-        let mut I_S = self.algorithm.encode();
-        // I_S.get_u8();?
+        let I_C = self.client_kexinit_payload.clone().context("unreachable")?;
+        let I_S = self.algorithm.encode();
         let K_S: VerifyingKey = server_public_key;
         let Q_C: EphemeralPublicKey = kex.client_ephemeral_public_key.clone();
         let Q_S: EphemeralPublicKey = server_emphemeral_key.clone();
@@ -217,6 +213,21 @@ impl SshServer {
     }
 
     pub async fn algorithm_negotiation(&mut self, client_algorithm: &Algorithm) -> Result<()> {
+        // self.algorithm.cookie = client_algorithm.cookie;
+        // self.algorithm.compression_algorithms_client_to_server = client_algorithm
+        //     .compression_algorithms_client_to_server
+        //     .clone();
+        // self.algorithm.compression_algorithms_server_to_client = client_algorithm
+        //     .compression_algorithms_server_to_client
+        //     .clone();
+        // self.algorithm.languages_client_to_server =
+        //     client_algorithm.languages_client_to_server.clone();
+
+        // self.algorithm.languages_server_to_client =
+        //     client_algorithm.languages_server_to_client.clone();
+
+        // self.algorithm.first_kex_packet_follows = client_algorithm.first_kex_packet_follows.clone();
+
         let server_algorithm = self.algorithm.encode();
 
         self.codec.send(server_algorithm).await?;
@@ -234,10 +245,14 @@ impl SshServer {
             }
         }
 
-        let client_identification = String::from_utf8_lossy(&buf);
+        let client_identification = String::from_utf8_lossy(&buf).to_string();
+        self.client_identification_raw =
+            Some(client_identification.trim_end_matches("\r\n").to_string());
+        let mut client_identification = client_identification.split(" ");
+        let client_identification = client_identification.next().unwrap().to_string();
 
         let (protoversion, softwareversion) = {
-            let mut splitted = client_identification.split("-");
+            let mut splitted = client_identification.splitn(3, "-");
             let _ = splitted.next();
 
             let protoversion = splitted
