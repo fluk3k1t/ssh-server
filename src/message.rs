@@ -6,6 +6,7 @@ use tokio_util::bytes::{Buf, BytesMut};
 
 use crate::BinaryPacket;
 use crate::SshBytesMut;
+use crate::SshNameList;
 use crate::SshString;
 
 #[derive(Debug)]
@@ -100,6 +101,16 @@ impl RawMessageBuilder {
         self
     }
 
+    pub fn put_name_list(mut self, lists: Vec<impl Into<String>>) -> Self {
+        SshNameList::new(lists).encode_to_bytes_mut(&mut self.paylaod);
+        self
+    }
+
+    pub fn put_bool(mut self, value: bool) -> Self {
+        self.paylaod.put_u8(value as u8);
+        self
+    }
+
     pub fn build(self) -> RawMessage {
         RawMessage {
             message_number: self.message_number,
@@ -115,7 +126,7 @@ pub trait BytesExt {
 impl BytesExt for Bytes {
     fn try_split_to(&mut self, n: usize) -> Result<Bytes> {
         if self.len() < n {
-            return Err(anyhow!(""));
+            return Err(anyhow!("failed to try 'split_to'"));
         }
 
         Ok(self.split_to(n))

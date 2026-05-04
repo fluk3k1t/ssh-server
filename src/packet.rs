@@ -266,6 +266,7 @@ impl Decoder for EncryptedBinaryPacketCodec {
                 *padding_remaining = padding_remaining.saturating_sub(reading_length);
 
                 let mut padding = src.split_to(reading_length);
+
                 // ctrモードを想定しているのでpaddingも復号する
                 // モードによって実装変わるやんと思いつつ
                 self.c2s_cipher.apply_keystream(&mut padding);
@@ -289,7 +290,7 @@ impl Encoder<Bytes> for EncryptedBinaryPacketCodec {
     fn encode(&mut self, item: Bytes, dst: &mut BytesMut) -> Result<(), Self::Error> {
         let mut padding_length = 4;
 
-        while (4 + 1 + item.len() + padding_length) % 8 != 0 {
+        while (4 + 1 + item.len() + padding_length) % 16 != 0 {
             padding_length += 1;
         }
 

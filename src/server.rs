@@ -18,7 +18,7 @@ use tokio_util::{
 use tracing::info;
 
 use crate::{
-    Algorithm, AuthRequest, BinaryPacketProtocol, Cipher, Codec, EncodeToBytesMut,
+    Algorithm, AuthMethod, AuthRequest, BinaryPacketProtocol, Cipher, Codec, EncodeToBytesMut,
     EncryptedBinaryPacketCodec, EphemeralPublicKey, Identification, Kex, KexAlgorithm,
     MessageNumber, Parse, RawMessage, RawMessageBuilder, ServiceRequest, SharedSecretKey,
     SignatureAlgorithm, SigningKey, SshBytesMut, SshNameList, SshString, VerifyingKey,
@@ -165,6 +165,30 @@ impl SshServer {
 
     pub async fn auth_request(&mut self, auth_req: AuthRequest) -> Result<()> {
         println!("{:?}", auth_req);
+
+        match auth_req.method {
+            AuthMethod::Password(plaintext_password) => {
+                if plaintext_password == "test" {
+                    let accept =
+                        RawMessageBuilder::new(MessageNumber::SSH_MSG_USERAUTH_SUCCESS).build();
+
+                    self.codec.send(accept.to_bytes()).await?;
+                } else {
+                    // let failure =
+                    //     RawMessageBuilder::new(MessageNumber::SSH_MSG_USERAUTH_FAILURE).build();
+
+                    // self.codec.send(failure.to_bytes()).await?;
+                }
+            }
+            AuthMethod::None => {
+                let msg = RawMessageBuilder::new(MessageNumber::SSH_MSG_USERAUTH_FAILURE)
+                    .put_name_list(vec!["password"])
+                    .put_bool(false)
+                    .build();
+
+                self.codec.send(msg.to_bytes()).await?;
+            }
+        }
 
         Ok(())
     }

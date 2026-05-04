@@ -1,17 +1,18 @@
-use tokio_util::bytes::Bytes;
+use tokio_util::bytes::{Buf, Bytes};
 
 use crate::{Parse, SshString};
 
 #[derive(Debug, Clone)]
 pub struct AuthRequest {
-    user_name: String,
-    service_name: String,
-    method: AuthMethod,
+    pub user_name: String,
+    pub service_name: String,
+    pub method: AuthMethod,
 }
 
 #[derive(Debug, Clone)]
 pub enum AuthMethod {
-    Password,
+    Password(String),
+    None,
 }
 
 impl Parse for AuthRequest {
@@ -48,10 +49,16 @@ impl Parse for AuthMethod {
     {
         let mut src = src.clone();
 
-        let (method, n) = SshString::parse(&mut src)?;
+        let method = SshString::parse_mut(&mut src)?;
 
         match method.to_string().as_str() {
-            "password" => Ok((AuthMethod::Password, n)),
+            "password" => {
+                let _ = src.get_u8();
+                let plain_password = SshString::parse_mut(&mut src)?.to_string();
+
+                Ok((AuthMethod::Password(plain_password), 0))
+            }
+            "none" => Ok((AuthMethod::None, 0)),
             _ => todo!(),
         }
     }
