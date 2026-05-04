@@ -1,10 +1,10 @@
 use aes::{
     Aes128,
-    cipher::{KeyIvInit, StreamCipher},
+    cipher::{Array, KeyIvInit, StreamCipher, array::ArraySize},
 };
 use anyhow::{Context, Result, anyhow};
 use futures::SinkExt;
-use p256::{ecdh::EphemeralSecret, elliptic_curve::rand_core::OsRng};
+use p256::{U32, ecdh::EphemeralSecret, elliptic_curve::rand_core::OsRng};
 use sha2::{Digest, Sha256};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
@@ -20,8 +20,8 @@ use tracing::info;
 use crate::{
     Algorithm, BinaryPacketProtocol, Cipher, Codec, EncodeToBytesMut, EncryptedBinaryPacketCodec,
     EphemeralPublicKey, Identification, Kex, KexAlgorithm, MessageNumber, Parse, RawMessage,
-    RawMessageBuilder, SharedSecretKey, SignatureAlgorithm, SigningKey, SshBytesMut, SshNameList,
-    SshString, VerifyingKey,
+    RawMessageBuilder, ServiceRequest, SharedSecretKey, SignatureAlgorithm, SigningKey,
+    SshBytesMut, SshNameList, SshString, VerifyingKey,
 };
 
 pub type Aes128Ctr128BE = ctr::Ctr128BE<aes::Aes128>;
@@ -132,7 +132,10 @@ impl SshServer {
                     let kex = Kex::parse(&raw_msg.paylaod, &self.algorithm)?;
                     self.kex_exchange(&kex).await?;
                 }
-                MessageNumber::SSH_MSG_SERVICE_REQUEST => {}
+                MessageNumber::SSH_MSG_SERVICE_REQUEST => {
+                    let (service_req, _) = ServiceRequest::parse(&raw_msg.paylaod)?;
+                    self.service_request(service_req).await?;
+                }
                 _ => {
                     println!("{:?}", raw_msg);
                     todo!();
@@ -154,6 +157,21 @@ impl SshServer {
                 todo!()
             }
         }
+    }
+
+    pub async fn service_request(&mut self, service_request: ServiceRequest) -> Result<()> {
+        match service_request {
+            ServiceRequest::UserAuth => {
+                let accept_msg = RawMessageBuilder::new(MessageNumber::SSH_MSG_SERVICE_ACCEPT)
+                    .put_ssh_string("ssh-userauth")
+                    .build();
+
+                self.codec.send(accept_msg.to_bytes()).await?;
+            }
+            ServiceRequest::Connection => todo!(),
+        }
+
+        Ok(())
     }
 
     pub async fn kex_exchange(&mut self, kex: &Kex) -> Result<()> {
@@ -204,7 +222,7 @@ impl SshServer {
             .put(Q_S.clone())
             .put_ssh_mpint(K.encode());
 
-        let H = Sha256::digest(concatenation);
+        let H: Array<u8, U32> = Sha256::digest(concatenation);
         let sign = server_host_key.sign(&H);
 
         let edch_reply = RawMessageBuilder::new(MessageNumber::SSH_MSG_KEX_ECDH_REPLY)
@@ -221,42 +239,63 @@ impl SshServer {
         self.codec.send(new_keys.to_bytes()).await?;
 
         let session_id = H.clone();
-        let iv = BytesMut::new()
+
+        let c2s_cipher = {
+            let c2s_iv = SshServer::compute_shared_secret_hash(&K, H, 'A', session_id);
+            let c2s_iv: [u8; 16] = c2s_iv[0..16].try_into().unwrap();
+
+            let c2s_enc_key = SshServer::compute_shared_secret_hash(&K, H, 'C', session_id);
+            let c2s_enc_key: [u8; 16] = c2s_enc_key[0..16].try_into().unwrap();
+
+            let c2s_int_key = SshServer::compute_shared_secret_hash(&K, H, 'E', session_id);
+            Aes128Ctr128BE::new(&c2s_enc_key.into(), &c2s_iv.into())
+        };
+
+        let s2c_cipher = {
+            let s2c_iv = SshServer::compute_shared_secret_hash(&K, H, 'B', session_id);
+            let s2c_iv: [u8; 16] = s2c_iv[0..16].try_into().unwrap();
+
+            let s2c_enc_key = SshServer::compute_shared_secret_hash(&K, H, 'D', session_id);
+            let s2c_enc_key: [u8; 16] = s2c_enc_key[0..16].try_into().unwrap();
+
+            let s2c_int_key = SshServer::compute_shared_secret_hash(&K, H, 'F', session_id);
+            Aes128Ctr128BE::new(&s2c_enc_key.into(), &s2c_iv.into())
+        };
+
+        let s2c_iv = BytesMut::new()
             .put_ssh_mpint(K.encode())
             .put_bytes(Bytes::from_iter(H.clone()))
-            .put_bytes(Bytes::from("A"))
+            .put_bytes(Bytes::from("B"))
             .put_bytes(Bytes::from_iter(session_id.clone()));
 
-        let iv = Sha256::digest(iv);
-        let iv: [u8; 16] = iv[0..16].try_into().unwrap();
+        let s2c_iv = Sha256::digest(s2c_iv);
+        let s2c_iv: [u8; 16] = s2c_iv[0..16].try_into().unwrap();
 
-        let enc_key_material = BytesMut::new()
+        let s2c_enc_key = BytesMut::new()
             .put_ssh_mpint(K.encode())
             .put_bytes(Bytes::from_iter(H.clone()))
-            .put_bytes(Bytes::from("C"))
+            .put_bytes(Bytes::from("D"))
             .put_bytes(Bytes::from_iter(session_id.clone()));
-        let enc_key = Sha256::digest(enc_key_material);
-        let enc_key: [u8; 16] = enc_key[0..16].try_into().unwrap();
+        let s2c_enc_key = Sha256::digest(s2c_enc_key);
+        let s2c_enc_key: [u8; 16] = s2c_enc_key[0..16].try_into().unwrap();
 
-        let cipher = Aes128Ctr128BE::new(&enc_key.into(), &iv.into());
-        // self.codec = self.codec.upgrade(cipher);
-        // self.cipher = Some(cipher);
-        // self.codec = self.codec.
-        self.codec.codec_mut().upgrade(cipher);
+        let s2c_int_key = BytesMut::new()
+            .put_ssh_mpint(K.encode())
+            .put_bytes(Bytes::from_iter(H.clone()))
+            .put_bytes(Bytes::from("F"))
+            .put_bytes(Bytes::from_iter(session_id.clone()));
 
-        // let mut stream = self.codec
-        // self.codec = Codec::Encrypted(Framed::)
+        let s2c_int_key = Sha256::digest(s2c_int_key);
+        let s2c_int_key: [u8; 32] = s2c_int_key[0..32].try_into().unwrap();
 
-        // println!("{:?}", iv);
+        let s2c_cipher = Aes128Ctr128BE::new(&s2c_enc_key.into(), &s2c_iv.into());
 
-        // let mut test_buf = [0; 1024];
+        let c2s_hmac = hmac_sha256::HMAC::new(c2s_int_key);
+        let s2c_hmac = hmac_sha256::HMAC::new(s2c_int_key);
 
-        // self.codec.get_mut().read(&mut test_buf).await?;
-
-        // println!("{:?}", &test_buf[..32]);
-        // cipher.apply_keystream(&mut test_buf[..32]);
-
-        // println!("{:?}", String::from_utf8_lossy(&test_buf[10..32]));
+        self.codec
+            .codec_mut()
+            .upgrade(c2s_cipher, s2c_cipher, c2s_hmac, s2c_hmac);
 
         Ok(())
     }
@@ -316,5 +355,20 @@ impl SshServer {
             .await?;
 
         Ok(())
+    }
+
+    fn compute_shared_secret_hash(
+        k: &SharedSecretKey,
+        h: Array<u8, U32>,
+        c: char,
+        session_id: Array<u8, U32>,
+    ) -> Array<u8, U32> {
+        let shared = BytesMut::new()
+            .put_ssh_mpint(k.encode())
+            .put_bytes(Bytes::from_iter(h.clone()))
+            .put_bytes(Bytes::from(String::from(c)))
+            .put_bytes(Bytes::from_iter(session_id.clone()));
+
+        Sha256::digest(shared)
     }
 }

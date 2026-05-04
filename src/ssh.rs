@@ -82,6 +82,10 @@ impl SshString {
     pub fn as_bytes(&self) -> Bytes {
         self.inner.clone()
     }
+
+    pub fn to_string(&self) -> String {
+        String::from_utf8_lossy(&self.inner).to_string()
+    }
 }
 
 impl EncodeToBytesMut for SshString {

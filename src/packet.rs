@@ -18,6 +18,8 @@ use tokio_util::{
 pub struct BinaryPacketProtocol {
     buffer: BytesMut,
     state: BinaryPacketProtocolState,
+    pub s2c_seq_num: u32,
+    pub c2s_seq_num: u32,
 }
 
 #[derive(Debug)]
@@ -37,6 +39,8 @@ impl BinaryPacketProtocol {
         BinaryPacketProtocol {
             buffer: BytesMut::with_capacity(32),
             state: BinaryPacketProtocolState::Header,
+            s2c_seq_num: 0,
+            c2s_seq_num: 0,
         }
     }
 }
@@ -104,6 +108,8 @@ impl Decoder for BinaryPacketProtocol {
                         self.buffer.clear();
                         src.clear();
 
+                        self.c2s_seq_num += 1;
+
                         Ok(Some(payload.freeze()))
                     }
                     _ => Ok(None),
@@ -130,6 +136,8 @@ impl Encoder<Bytes> for BinaryPacketProtocol {
         dst.put(item);
         dst.put_bytes(0, padding_length);
 
+        self.s2c_seq_num += 1;
+
         Ok(())
     }
 }
@@ -144,19 +152,36 @@ pub enum EncryptedBinaryPacketCodecState {
     Mac(Vec<u8>),
 }
 pub struct EncryptedBinaryPacketCodec {
-    cipher: Cipher,
+    c2s_cipher: Cipher,
+    s2c_cipher: Cipher,
+    c2s_hmac: hmac_sha256::HMAC,
+    s2c_hmac: hmac_sha256::HMAC,
     state: EncryptedBinaryPacketCodecState,
     packet_length: Option<u32>,
     padding_length: Option<u8>,
+    s2c_seq_num: u32,
+    c2s_seq_num: u32,
 }
 
 impl EncryptedBinaryPacketCodec {
-    pub fn new(cipher: Cipher) -> Self {
+    pub fn new(
+        c2s_cipher: Cipher,
+        s2c_cipher: Cipher,
+        c2s_hmac: hmac_sha256::HMAC,
+        s2c_hmac: hmac_sha256::HMAC,
+        c2s_seq_num: u32,
+        s2c_seq_num: u32,
+    ) -> Self {
         EncryptedBinaryPacketCodec {
-            cipher,
+            c2s_cipher,
+            s2c_cipher,
+            c2s_hmac,
+            s2c_hmac,
             state: EncryptedBinaryPacketCodecState::Header,
             packet_length: None,
             padding_length: None,
+            c2s_seq_num,
+            s2c_seq_num,
         }
     }
 }
@@ -174,9 +199,11 @@ impl Decoder for EncryptedBinaryPacketCodec {
 
                 let _mac = src.split_to(32);
 
-                println!("{:02x?}", &_mac[..32]);
+                // println!("{:02x?}", &_mac[..32]);
 
                 src.clear();
+
+                self.c2s_seq_num += 1;
 
                 let payload = payload.clone();
                 self.state = EncryptedBinaryPacketCodecState::Header;
@@ -188,9 +215,8 @@ impl Decoder for EncryptedBinaryPacketCodec {
                     return Ok(None);
                 }
 
-                // packet_length, padding_lengthフィールドのみを複合
-                // 復号によりcipherの内部ivが進む?
-                self.cipher
+                // packet_length, padding_lengthフィールドのみを復号
+                self.c2s_cipher
                     .apply_keystream(&mut src[..(size_of::<u32>() + size_of::<u8>())]);
 
                 let packet_length = src.get_u32() as usize;
@@ -236,17 +262,11 @@ impl Decoder for EncryptedBinaryPacketCodec {
                     0 => {
                         let mut payload = payload.clone();
 
-                        self.cipher.apply_keystream(&mut payload);
-                        // for chunk in payload.chunks_mut(3) {
-                        // self.cipher.apply_keystream(chunk);
-                        // }
+                        self.c2s_cipher.apply_keystream(&mut payload);
 
                         self.state = EncryptedBinaryPacketCodecState::Mac(payload.clone());
 
                         self.decode(src)
-                        // Ok(Some(BinaryPacket {
-                        //     payload: Payload::new(BytesMut::from_iter(payload)),
-                        // }))
                     }
                     _ => Ok(None),
                 }
@@ -272,7 +292,18 @@ impl Encoder<Bytes> for EncryptedBinaryPacketCodec {
         dst.put(item);
         dst.put_bytes(0, padding_length);
 
-        self.cipher.apply_keystream(dst);
+        let mut for_mac = BytesMut::new();
+        for_mac.put_u32(self.s2c_seq_num);
+        for_mac.extend(dst.clone());
+
+        self.s2c_hmac.update(for_mac);
+        let mac = self.s2c_hmac.clone().finalize();
+
+        self.s2c_cipher.apply_keystream(dst);
+
+        dst.extend(&mac[..]);
+
+        self.s2c_seq_num += 1;
 
         Ok(())
     }
@@ -284,8 +315,28 @@ pub enum Codec {
 }
 
 impl Codec {
-    pub fn upgrade(&mut self, cipher: Aes128Ctr128BE) {
-        *self = Codec::Encrypted(EncryptedBinaryPacketCodec::new(cipher));
+    pub fn upgrade(
+        &mut self,
+        c2s_cipher: Cipher,
+        s2c_cipher: Cipher,
+        c2s_hmac: hmac_sha256::HMAC,
+        s2c_hmac: hmac_sha256::HMAC,
+    ) {
+        let (c2s_seq_num, s2c_seq_num) = {
+            match self {
+                Codec::Plain(plain) => (plain.c2s_seq_num, plain.s2c_seq_num),
+                Codec::Encrypted(enc) => (enc.c2s_seq_num, enc.s2c_seq_num),
+            }
+        };
+
+        *self = Codec::Encrypted(EncryptedBinaryPacketCodec::new(
+            c2s_cipher,
+            s2c_cipher,
+            c2s_hmac,
+            s2c_hmac,
+            c2s_seq_num,
+            s2c_seq_num,
+        ));
     }
 }
 

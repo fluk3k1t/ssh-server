@@ -16,5 +16,8 @@ pub use algorithm::*;
 pub mod kex;
 pub use kex::*;
 
+pub mod service;
+pub use service::*;
+
 pub mod key;
 pub use key::*;
