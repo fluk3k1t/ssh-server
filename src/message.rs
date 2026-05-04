@@ -35,6 +35,11 @@ pub enum MessageNumber {
 
     SSH_MSG_KEX_ECDH_INIT = 30,
     SSH_MSG_KEX_ECDH_REPLY = 31,
+
+    SSH_MSG_USERAUTH_REQUEST = 50,
+    SSH_MSG_USERAUTH_FAILURE = 51,
+    SSH_MSG_USERAUTH_SUCCESS = 52,
+    SSH_MSG_USERAUTH_BANNER = 53,
 }
 
 impl TryFrom<u8> for MessageNumber {
@@ -48,6 +53,10 @@ impl TryFrom<u8> for MessageNumber {
             21 => Ok(Self::SSH_MSG_NEWKEYS),
             30 => Ok(Self::SSH_MSG_KEX_ECDH_INIT),
             31 => Ok(Self::SSH_MSG_KEX_ECDH_REPLY),
+            50 => Ok(Self::SSH_MSG_USERAUTH_REQUEST),
+            51 => Ok(Self::SSH_MSG_USERAUTH_FAILURE),
+            52 => Ok(Self::SSH_MSG_USERAUTH_SUCCESS),
+            53 => Ok(Self::SSH_MSG_USERAUTH_BANNER),
             _ => Err(anyhow!("invalid message number")),
         }
     }

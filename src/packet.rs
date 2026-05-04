@@ -9,7 +9,7 @@ use hmac_sha256::HMAC;
 use p256::U32;
 use std::cmp::min;
 use tokio::net::TcpStream;
-use tracing::debug;
+use tracing::{debug, info};
 
 use tokio_util::{
     bytes::{Buf, BufMut, Bytes, BytesMut},
@@ -199,9 +199,9 @@ impl Decoder for EncryptedBinaryPacketCodec {
                     return Ok(None);
                 }
 
-                let _mac = src.split_to(32);
+                debug!("reading mac");
 
-                // println!("{:02x?}", &_mac[..32]);
+                let _mac = src.split_to(32);
 
                 src.clear();
 
@@ -216,6 +216,8 @@ impl Decoder for EncryptedBinaryPacketCodec {
                 if src.remaining() < size_of::<u32>() + size_of::<u8>() {
                     return Ok(None);
                 }
+
+                debug!("reading header");
 
                 // packet_length, padding_lengthフィールドのみを復号
                 self.c2s_cipher
@@ -237,6 +239,8 @@ impl Decoder for EncryptedBinaryPacketCodec {
                 padding_remaining,
                 payload,
             ) => {
+                debug!("reading payload");
+
                 let reading_length = min(*payload_remaining, src.remaining());
                 *payload_remaining = payload_remaining.saturating_sub(reading_length);
 
@@ -244,10 +248,11 @@ impl Decoder for EncryptedBinaryPacketCodec {
 
                 match *payload_remaining {
                     0 => {
-                        self.state = EncryptedBinaryPacketCodecState::Padding(
-                            *padding_remaining,
-                            payload.clone(),
-                        );
+                        let mut payload = payload.clone();
+                        self.c2s_cipher.apply_keystream(&mut payload);
+
+                        self.state =
+                            EncryptedBinaryPacketCodecState::Padding(*padding_remaining, payload);
                         self.decode(src)
                     }
                     _ => Ok(None),
@@ -255,17 +260,18 @@ impl Decoder for EncryptedBinaryPacketCodec {
             }
 
             EncryptedBinaryPacketCodecState::Padding(padding_remaining, payload) => {
+                debug!("reading padding");
+
                 let reading_length = min(*padding_remaining, src.remaining());
                 *padding_remaining = padding_remaining.saturating_sub(reading_length);
 
-                src.advance(reading_length);
+                let mut padding = src.split_to(reading_length);
+                // ctrモードを想定しているのでpaddingも復号する
+                // モードによって実装変わるやんと思いつつ
+                self.c2s_cipher.apply_keystream(&mut padding);
 
                 match *padding_remaining {
                     0 => {
-                        let mut payload = payload.clone();
-
-                        self.c2s_cipher.apply_keystream(&mut payload);
-
                         self.state = EncryptedBinaryPacketCodecState::Mac(payload.clone());
 
                         self.decode(src)

@@ -18,10 +18,10 @@ use tokio_util::{
 use tracing::info;
 
 use crate::{
-    Algorithm, BinaryPacketProtocol, Cipher, Codec, EncodeToBytesMut, EncryptedBinaryPacketCodec,
-    EphemeralPublicKey, Identification, Kex, KexAlgorithm, MessageNumber, Parse, RawMessage,
-    RawMessageBuilder, ServiceRequest, SharedSecretKey, SignatureAlgorithm, SigningKey,
-    SshBytesMut, SshNameList, SshString, VerifyingKey,
+    Algorithm, AuthRequest, BinaryPacketProtocol, Cipher, Codec, EncodeToBytesMut,
+    EncryptedBinaryPacketCodec, EphemeralPublicKey, Identification, Kex, KexAlgorithm,
+    MessageNumber, Parse, RawMessage, RawMessageBuilder, ServiceRequest, SharedSecretKey,
+    SignatureAlgorithm, SigningKey, SshBytesMut, SshNameList, SshString, VerifyingKey,
 };
 
 pub type Aes128Ctr128BE = ctr::Ctr128BE<aes::Aes128>;
@@ -136,6 +136,10 @@ impl SshServer {
                     let (service_req, _) = ServiceRequest::parse(&raw_msg.paylaod)?;
                     self.service_request(service_req).await?;
                 }
+                MessageNumber::SSH_MSG_USERAUTH_REQUEST => {
+                    let (auth_req, _) = AuthRequest::parse(&raw_msg.paylaod)?;
+                    self.auth_request(auth_req).await?;
+                }
                 _ => {
                     println!("{:?}", raw_msg);
                     todo!();
@@ -157,6 +161,12 @@ impl SshServer {
                 todo!()
             }
         }
+    }
+
+    pub async fn auth_request(&mut self, auth_req: AuthRequest) -> Result<()> {
+        println!("{:?}", auth_req);
+
+        Ok(())
     }
 
     pub async fn service_request(&mut self, service_request: ServiceRequest) -> Result<()> {

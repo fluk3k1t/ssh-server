@@ -19,5 +19,8 @@ pub use kex::*;
 pub mod service;
 pub use service::*;
 
+pub mod auth;
+pub use auth::*;
+
 pub mod key;
 pub use key::*;
