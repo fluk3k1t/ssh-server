@@ -240,7 +240,7 @@ impl SshServer {
 
         let session_id = H.clone();
 
-        let c2s_cipher = {
+        let (c2s_cipher, c2s_hmac_key) = {
             let c2s_iv = SshServer::compute_shared_secret_hash(&K, H, 'A', session_id);
             let c2s_iv: [u8; 16] = c2s_iv[0..16].try_into().unwrap();
 
@@ -248,10 +248,12 @@ impl SshServer {
             let c2s_enc_key: [u8; 16] = c2s_enc_key[0..16].try_into().unwrap();
 
             let c2s_int_key = SshServer::compute_shared_secret_hash(&K, H, 'E', session_id);
-            Aes128Ctr128BE::new(&c2s_enc_key.into(), &c2s_iv.into())
+            let cipher = Aes128Ctr128BE::new(&c2s_enc_key.into(), &c2s_iv.into());
+
+            (cipher, c2s_int_key)
         };
 
-        let s2c_cipher = {
+        let (s2c_cipher, s2c_hmac_key) = {
             let s2c_iv = SshServer::compute_shared_secret_hash(&K, H, 'B', session_id);
             let s2c_iv: [u8; 16] = s2c_iv[0..16].try_into().unwrap();
 
@@ -259,43 +261,14 @@ impl SshServer {
             let s2c_enc_key: [u8; 16] = s2c_enc_key[0..16].try_into().unwrap();
 
             let s2c_int_key = SshServer::compute_shared_secret_hash(&K, H, 'F', session_id);
-            Aes128Ctr128BE::new(&s2c_enc_key.into(), &s2c_iv.into())
+            let cipher = Aes128Ctr128BE::new(&s2c_enc_key.into(), &s2c_iv.into());
+
+            (cipher, s2c_int_key)
         };
-
-        let s2c_iv = BytesMut::new()
-            .put_ssh_mpint(K.encode())
-            .put_bytes(Bytes::from_iter(H.clone()))
-            .put_bytes(Bytes::from("B"))
-            .put_bytes(Bytes::from_iter(session_id.clone()));
-
-        let s2c_iv = Sha256::digest(s2c_iv);
-        let s2c_iv: [u8; 16] = s2c_iv[0..16].try_into().unwrap();
-
-        let s2c_enc_key = BytesMut::new()
-            .put_ssh_mpint(K.encode())
-            .put_bytes(Bytes::from_iter(H.clone()))
-            .put_bytes(Bytes::from("D"))
-            .put_bytes(Bytes::from_iter(session_id.clone()));
-        let s2c_enc_key = Sha256::digest(s2c_enc_key);
-        let s2c_enc_key: [u8; 16] = s2c_enc_key[0..16].try_into().unwrap();
-
-        let s2c_int_key = BytesMut::new()
-            .put_ssh_mpint(K.encode())
-            .put_bytes(Bytes::from_iter(H.clone()))
-            .put_bytes(Bytes::from("F"))
-            .put_bytes(Bytes::from_iter(session_id.clone()));
-
-        let s2c_int_key = Sha256::digest(s2c_int_key);
-        let s2c_int_key: [u8; 32] = s2c_int_key[0..32].try_into().unwrap();
-
-        let s2c_cipher = Aes128Ctr128BE::new(&s2c_enc_key.into(), &s2c_iv.into());
-
-        let c2s_hmac = hmac_sha256::HMAC::new(c2s_int_key);
-        let s2c_hmac = hmac_sha256::HMAC::new(s2c_int_key);
 
         self.codec
             .codec_mut()
-            .upgrade(c2s_cipher, s2c_cipher, c2s_hmac, s2c_hmac);
+            .upgrade(c2s_cipher, s2c_cipher, c2s_hmac_key, s2c_hmac_key);
 
         Ok(())
     }

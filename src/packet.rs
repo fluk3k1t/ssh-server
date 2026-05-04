@@ -1,10 +1,12 @@
 use crate::server::Aes128Ctr128BE;
 use aes::{
     Aes128,
-    cipher::{StreamCipher, StreamCipherCoreWrapper},
+    cipher::{Array, StreamCipher, StreamCipherCoreWrapper},
 };
 use anyhow::Error;
 use futures::SinkExt;
+use hmac_sha256::HMAC;
+use p256::U32;
 use std::cmp::min;
 use tokio::net::TcpStream;
 use tracing::debug;
@@ -154,8 +156,8 @@ pub enum EncryptedBinaryPacketCodecState {
 pub struct EncryptedBinaryPacketCodec {
     c2s_cipher: Cipher,
     s2c_cipher: Cipher,
-    c2s_hmac: hmac_sha256::HMAC,
-    s2c_hmac: hmac_sha256::HMAC,
+    c2s_hmac_key: Array<u8, U32>,
+    s2c_hmac_key: Array<u8, U32>,
     state: EncryptedBinaryPacketCodecState,
     packet_length: Option<u32>,
     padding_length: Option<u8>,
@@ -167,16 +169,16 @@ impl EncryptedBinaryPacketCodec {
     pub fn new(
         c2s_cipher: Cipher,
         s2c_cipher: Cipher,
-        c2s_hmac: hmac_sha256::HMAC,
-        s2c_hmac: hmac_sha256::HMAC,
+        c2s_hmac_key: Array<u8, U32>,
+        s2c_hmac_key: Array<u8, U32>,
         c2s_seq_num: u32,
         s2c_seq_num: u32,
     ) -> Self {
         EncryptedBinaryPacketCodec {
             c2s_cipher,
             s2c_cipher,
-            c2s_hmac,
-            s2c_hmac,
+            c2s_hmac_key,
+            s2c_hmac_key,
             state: EncryptedBinaryPacketCodecState::Header,
             packet_length: None,
             padding_length: None,
@@ -296,8 +298,10 @@ impl Encoder<Bytes> for EncryptedBinaryPacketCodec {
         for_mac.put_u32(self.s2c_seq_num);
         for_mac.extend(dst.clone());
 
-        self.s2c_hmac.update(for_mac);
-        let mac = self.s2c_hmac.clone().finalize();
+        let mut hmac = HMAC::new(self.s2c_hmac_key);
+
+        hmac.update(for_mac);
+        let mac = hmac.clone().finalize();
 
         self.s2c_cipher.apply_keystream(dst);
 
@@ -319,8 +323,8 @@ impl Codec {
         &mut self,
         c2s_cipher: Cipher,
         s2c_cipher: Cipher,
-        c2s_hmac: hmac_sha256::HMAC,
-        s2c_hmac: hmac_sha256::HMAC,
+        c2s_hmac_key: Array<u8, U32>,
+        s2c_hmac_key: Array<u8, U32>,
     ) {
         let (c2s_seq_num, s2c_seq_num) = {
             match self {
@@ -332,8 +336,8 @@ impl Codec {
         *self = Codec::Encrypted(EncryptedBinaryPacketCodec::new(
             c2s_cipher,
             s2c_cipher,
-            c2s_hmac,
-            s2c_hmac,
+            c2s_hmac_key,
+            s2c_hmac_key,
             c2s_seq_num,
             s2c_seq_num,
         ));
